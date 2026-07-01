@@ -40,11 +40,6 @@ function addMonthMinusDay(dateStr: string): string {
   return nextMonth.toISOString().slice(0, 10);
 }
 
-function daysBetween(a: string, b: string): number {
-  return Math.round(
-    (new Date(b + "T00:00:00Z").getTime() - new Date(a + "T00:00:00Z").getTime()) / 86400000
-  );
-}
 
 function formatDisplayDate(dateStr: string): string {
   return new Date(dateStr + "T00:00:00Z").toLocaleDateString("en-MY", {
@@ -100,8 +95,6 @@ export default function SendBulkInvoicePage() {
   useEffect(() => {
     if (!startDate || !endDate) { setDateError(null); return; }
     if (endDate < startDate) { setDateError("End date must be after start date"); return; }
-    const diff = daysBetween(startDate, endDate);
-    if (diff > 30) { setDateError("Billing period must not exceed 30 days"); return; }
     if (scheduledSendDate && scheduledSendDate < today) {
       setDateError("Scheduled send date cannot be in the past"); return;
     }
@@ -232,7 +225,7 @@ export default function SendBulkInvoicePage() {
         <div className="bg-white rounded-2xl shadow p-6">
           <h2 className="text-lg font-semibold text-gray-900 mb-1">Set Billing Cycle</h2>
           <p className="text-sm text-gray-500 mb-4">
-            Set the billing period and scheduled send date. The end date is auto-suggested as one day before the start day in the following month.
+            Set the billing period and scheduled send date. The end date is auto-suggested as the day before the start day in the following month — you may adjust it freely.
           </p>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
