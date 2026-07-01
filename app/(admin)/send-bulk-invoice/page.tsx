@@ -1,277 +1,219 @@
+// app/(admin)/send-bulk-invoice/page.tsx
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import Modal from "@/components/Modal";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { MOCK_SUBSCRIBERS } from "@/lib/mock/subscribers";
+import { isSubscriberEligible, getMissingDates } from "@/lib/mock/generation";
 
-interface SubscriberRow {
+interface BillingJob {
+  jobId: string;
+  startDate: string;
+  endDate: string;
+  scheduledSendDate: string;
+  status: string;
+  successCount?: number;
+  failedCount?: number;
+  blockedCount?: number;
+  latestLogId?: string | null;
+}
+
+interface EligibleRow {
   plant_id: string;
   name: string;
   email: string;
-  alternative_email_address_1?: string;
-  alternative_email_address_2?: string;
 }
 
-interface ReminderRecipient {
-  plantId: string;
-  customerName: string;
-  emails: string[];
+interface BlockedRow {
+  plant_id: string;
+  name: string;
+  email: string;
+  reason: string;
+  missingDates: string[];
 }
 
-interface SendSummary {
-  totalRequested: number;
-  eligibleCount: number;
-  blockedCount: number;
-  totalRecipients: number;
-  successCount: number;
-  failedCount: number;
-  blocked: Array<{ plantId?: string; customerName?: string; reasonCode?: string; reason?: string }>;
-  failed: Array<{ email: string; plantId?: string; status: "failed"; error?: string }>;
+function addMonthMinusDay(dateStr: string): string {
+  const d = new Date(dateStr + "T00:00:00Z");
+  const nextMonth = new Date(d);
+  nextMonth.setUTCMonth(d.getUTCMonth() + 1);
+  nextMonth.setUTCDate(d.getUTCDate() - 1);
+  return nextMonth.toISOString().slice(0, 10);
 }
 
-interface ConfirmContext {
-  action: "selected" | "all";
-  recipients: ReminderRecipient[];
-  skippedNoEmail: number;
-}
-
-interface SendProgress {
-  done: number;
-  total: number;
-  chunkSize: number;
-}
-
-type LastSentMap = Record<string, string>;
-
-const EMAIL_CHUNK_SIZE = 20;
-
-function normalizeEmail(email: string): string {
-  return email.trim().toLowerCase();
-}
-
-function isValidEmail(email: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-}
-
-function dedupeEmails(emails: string[]): string[] {
-  return Array.from(
-    new Set(emails.map(normalizeEmail).filter((e) => !!e && isValidEmail(e)))
+function daysBetween(a: string, b: string): number {
+  return Math.round(
+    (new Date(b + "T00:00:00Z").getTime() - new Date(a + "T00:00:00Z").getTime()) / 86400000
   );
 }
 
-function toRecipient(subscriber: SubscriberRow): ReminderRecipient | null {
-  const emails = dedupeEmails([
-    subscriber.email || "",
-    subscriber.alternative_email_address_1 || "",
-    subscriber.alternative_email_address_2 || "",
-  ]);
-  if (emails.length === 0) return null;
-  return { plantId: subscriber.plant_id, customerName: subscriber.name || "Valued Customer", emails };
+function formatDisplayDate(dateStr: string): string {
+  return new Date(dateStr + "T00:00:00Z").toLocaleDateString("en-MY", {
+    day: "numeric", month: "long", year: "numeric", timeZone: "UTC",
+  });
 }
 
-function chunkArray<T>(items: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < items.length; i += size) chunks.push(items.slice(i, i + size));
-  return chunks;
-}
-
-function formatLastSent(ts?: string): string {
-  if (!ts) return "-";
-  const d = new Date(ts);
-  return isNaN(d.getTime()) ? "-" : d.toLocaleString();
-}
-
-function buildToastMessage(summary: SendSummary): string {
-  if (summary.failedCount === 0 && summary.blockedCount === 0) {
-    return `Sent ${summary.successCount} reminder email${summary.successCount === 1 ? "" : "s"} successfully.`;
-  }
-  return `Sent ${summary.successCount}/${summary.eligibleCount}. Blocked: ${summary.blockedCount}. Failed: ${summary.failedCount}.`;
-}
+const STATUS_COLORS: Record<string, string> = {
+  Pending: "bg-yellow-100 text-yellow-800",
+  Running: "bg-blue-100 text-blue-800",
+  Completed: "bg-green-100 text-green-800",
+  "Partially Completed": "bg-orange-100 text-orange-800",
+  Failed: "bg-red-100 text-red-800",
+};
 
 export default function SendBulkInvoicePage() {
-  const [subscribers] = useState<SubscriberRow[]>(MOCK_SUBSCRIBERS);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [selectedPlantIds, setSelectedPlantIds] = useState<Set<string>>(new Set());
-  const [sending, setSending] = useState(false);
-  const [sendProgress, setSendProgress] = useState<SendProgress | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [confirmContext, setConfirmContext] = useState<ConfirmContext | null>(null);
-  const [sendSummary, setSendSummary] = useState<SendSummary | null>(null);
-  const [lastSentMap, setLastSentMap] = useState<LastSentMap>({});
+  const router = useRouter();
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Date picker state
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
+  const [scheduledSendDate, setScheduledSendDate] = useState("");
+  const [dateError, setDateError] = useState<string | null>(null);
+  const [savingJob, setSavingJob] = useState(false);
+
+  // Current job
+  const [currentJob, setCurrentJob] = useState<BillingJob | null>(null);
+  const [loadingJob, setLoadingJob] = useState(true);
+
+  // Run / test send state
+  const [running, setRunning] = useState(false);
+  const [runResult, setRunResult] = useState<{
+    status: string; sent: number; failed: number; blocked: number; isTest?: boolean;
+  } | null>(null);
+
+  // Toast
   const [toast, setToast] = useState<{ message: string; type: "success" | "warning" | "error" } | null>(null);
 
-  const selectAllRef = useRef<HTMLInputElement>(null);
-  const isSendingRef = useRef(false);
-  const isCancelledRef = useRef(false);
-
-  const showToast = (message: string, type: "success" | "warning" | "error") => {
+  function showToast(message: string, type: "success" | "warning" | "error") {
     setToast({ message, type });
-    setTimeout(() => setToast(null), 5000);
-  };
+    setTimeout(() => setToast(null), 6000);
+  }
 
-  const filteredSubscribers = useMemo(() => {
-    if (!searchQuery.trim()) return subscribers;
-    const q = searchQuery.toLowerCase();
-    return subscribers.filter(
-      (s) =>
-        s.plant_id?.toLowerCase().includes(q) ||
-        s.name?.toLowerCase().includes(q) ||
-        s.email?.toLowerCase().includes(q)
-    );
-  }, [subscribers, searchQuery]);
-
-  const selectableFilteredIds = useMemo(
-    () => filteredSubscribers.filter((s) => !!toRecipient(s)).map((s) => s.plant_id),
-    [filteredSubscribers]
-  );
-
-  const selectedFilteredCount = useMemo(
-    () => selectableFilteredIds.filter((id) => selectedPlantIds.has(id)).length,
-    [selectableFilteredIds, selectedPlantIds]
-  );
-
-  const allFilteredSelected =
-    selectableFilteredIds.length > 0 && selectedFilteredCount === selectableFilteredIds.length;
-  const partiallySelected = selectedFilteredCount > 0 && selectedFilteredCount < selectableFilteredIds.length;
-
+  // Auto-suggest end date when start date changes
   useEffect(() => {
-    if (selectAllRef.current) selectAllRef.current.indeterminate = partiallySelected;
-  }, [partiallySelected]);
+    if (startDate) {
+      setEndDate(addMonthMinusDay(startDate));
+    }
+  }, [startDate]);
 
-  // Load last-sent timestamps from emulator Firestore
-  const loadLastSentTimestamps = useCallback(async (plantIds: string[]) => {
-    const unique = Array.from(new Set(plantIds.filter(Boolean)));
-    if (unique.length === 0) return;
+  // Validate date inputs
+  useEffect(() => {
+    if (!startDate || !endDate) { setDateError(null); return; }
+    if (endDate < startDate) { setDateError("End date must be after start date"); return; }
+    const diff = daysBetween(startDate, endDate);
+    if (diff > 30) { setDateError("Billing period must not exceed 30 days"); return; }
+    if (scheduledSendDate && scheduledSendDate < today) {
+      setDateError("Scheduled send date cannot be in the past"); return;
+    }
+    setDateError(null);
+  }, [startDate, endDate, scheduledSendDate, today]);
+
+  const canSetCycle = !!(startDate && endDate && scheduledSendDate && !dateError);
+
+  // Load current job from Firebase
+  const loadJob = useCallback(async () => {
+    setLoadingJob(true);
     try {
-      const res = await fetch("/api/firestore/payment-reminder/get-last-sent-by-plant-ids", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plantIds: unique }),
-      });
+      const res = await fetch("/api/bulk-invoice/job");
       if (!res.ok) return;
-      const data = await res.json();
-      setLastSentMap(data?.results || {});
+      const data = await res.json() as BillingJob | { job: null };
+      if ("jobId" in data) setCurrentJob(data);
+      else setCurrentJob(null);
     } catch {
-      // silently ignore — emulator may not have data yet
+      // ignore
+    } finally {
+      setLoadingJob(false);
     }
   }, []);
 
+  useEffect(() => { loadJob(); }, [loadJob]);
+
+  // Poll while Running
   useEffect(() => {
-    loadLastSentTimestamps(subscribers.map((s) => s.plant_id));
-  }, [subscribers, loadLastSentTimestamps]);
+    if (currentJob?.status !== "Running") return;
+    const interval = setInterval(loadJob, 3000);
+    return () => clearInterval(interval);
+  }, [currentJob?.status, loadJob]);
 
-  const toggleSelection = (plantId: string) => {
-    setSelectedPlantIds((prev) => {
-      const next = new Set(prev);
-      next.has(plantId) ? next.delete(plantId) : next.add(plantId);
-      return next;
-    });
-  };
+  // Subscriber preflight split
+  const billingRange = currentJob
+    ? { start: currentJob.startDate, end: currentJob.endDate }
+    : startDate && endDate
+    ? { start: startDate, end: endDate }
+    : null;
 
-  const toggleSelectAll = () => {
-    setSelectedPlantIds((prev) => {
-      const next = new Set(prev);
-      if (allFilteredSelected) {
-        selectableFilteredIds.forEach((id) => next.delete(id));
-      } else {
-        selectableFilteredIds.forEach((id) => next.add(id));
+  const { eligible, blocked } = useMemo<{ eligible: EligibleRow[]; blocked: BlockedRow[] }>(() => {
+    if (!billingRange) return { eligible: [], blocked: [] };
+    const el: EligibleRow[] = [];
+    const bl: BlockedRow[] = [];
+
+    for (const sub of MOCK_SUBSCRIBERS) {
+      if (!sub.email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(sub.email)) {
+        bl.push({ plant_id: sub.plant_id, name: sub.name, email: sub.email || "", reason: "No email address", missingDates: [] });
+        continue;
       }
-      return next;
-    });
-  };
-
-  const openConfirmation = (action: "selected" | "all") => {
-    const source =
-      action === "all"
-        ? subscribers
-        : subscribers.filter((s) => selectedPlantIds.has(s.plant_id));
-
-    const rawRecipients = source.map(toRecipient).filter((r): r is ReminderRecipient => !!r);
-    const skippedNoEmail = source.length - rawRecipients.length;
-
-    if (rawRecipients.length === 0) {
-      showToast("No valid recipient email found", "warning");
-      return;
+      if (!isSubscriberEligible(sub.plant_id, billingRange.start, billingRange.end)) {
+        const missing = getMissingDates(sub.plant_id, billingRange.start, billingRange.end);
+        bl.push({ plant_id: sub.plant_id, name: sub.name, email: sub.email, reason: "Missing generation data", missingDates: missing });
+        continue;
+      }
+      el.push({ plant_id: sub.plant_id, name: sub.name, email: sub.email });
     }
+    return { eligible: el, blocked: bl };
+  }, [billingRange]);
 
-    setConfirmContext({ action, recipients: rawRecipients, skippedNoEmail });
-    setConfirmOpen(true);
-  };
-
-  const handleSend = async () => {
-    if (!confirmContext || isSendingRef.current) return;
-
-    isSendingRef.current = true;
-    isCancelledRef.current = false;
-    setSending(true);
-    setSendProgress({ done: 0, total: confirmContext.recipients.length, chunkSize: 0 });
-    setSendSummary(null);
-
+  async function handleSetCycle() {
+    if (!canSetCycle) return;
+    setSavingJob(true);
     try {
-      const chunks = chunkArray(confirmContext.recipients, EMAIL_CHUNK_SIZE);
-      let totalRequested = 0, eligibleCount = 0, blockedCount = 0;
-      let totalRecipients = 0, successCount = 0, failedCount = 0, done = 0;
-      const blocked: SendSummary["blocked"] = [];
-      const failed: SendSummary["failed"] = [];
-      const lastSentAgg: LastSentMap = {};
-
-      for (const chunk of chunks) {
-        if (isCancelledRef.current) break;
-
-        setSendProgress({ done, total: confirmContext.recipients.length, chunkSize: chunk.length });
-
-        const res = await fetch("/api/email/reminder/bulk", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ recipients: chunk }),
-        });
-
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "Failed to send reminder emails");
-
-        totalRequested += Number(data.totalRequested || chunk.length);
-        eligibleCount += Number(data.eligibleCount || 0);
-        blockedCount += Number(data.blockedCount || 0);
-        totalRecipients += Number(data.totalRecipients || 0);
-        successCount += Number(data.successCount || 0);
-        failedCount += Number(data.failedCount || 0);
-        blocked.push(...(data.blocked || []));
-        failed.push(...(data.failed || []));
-        Object.assign(lastSentAgg, data.lastSentUpdates || {});
-
-        done += chunk.length;
-        setSendProgress({ done, total: confirmContext.recipients.length, chunkSize: chunk.length });
-
-        if (!isCancelledRef.current && done < confirmContext.recipients.length) {
-          await new Promise((r) => setTimeout(r, 150));
-        }
+      const res = await fetch("/api/bulk-invoice/create-job", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ startDate, endDate, scheduledSendDate }),
+      });
+      if (!res.ok) {
+        const e = await res.json() as { error: string };
+        showToast(e.error || "Failed to set billing cycle", "error");
+        return;
       }
+      const job = await res.json() as BillingJob;
+      setCurrentJob(job);
+      showToast("Billing cycle set successfully", "success");
+    } catch {
+      showToast("Failed to set billing cycle", "error");
+    } finally {
+      setSavingJob(false);
+    }
+  }
 
-      if (isCancelledRef.current) {
-        showToast("Bulk email sending cancelled", "warning");
+  async function handleRun(isTest: boolean) {
+    if (!currentJob || running) return;
+    setRunning(true);
+    setRunResult(null);
+    try {
+      const res = await fetch(`/api/bulk-invoice/run?force=true${isTest ? "&isTest=true" : ""}`, {
+        method: "POST",
+      });
+      const data = await res.json() as { status: string; sent: number; failed: number; blocked: number; error?: string };
+      if (!res.ok) {
+        showToast(data.error || "Run failed", "error");
+        return;
+      }
+      setRunResult({ ...data, isTest });
+      await loadJob();
+      if (isTest) {
+        showToast(`Test send complete — ${data.sent} sent, ${data.blocked} blocked, ${data.failed} failed. Results visible in Send History (marked as Test).`, "success");
       } else {
-        const summary: SendSummary = {
-          totalRequested, eligibleCount, blockedCount,
-          totalRecipients, successCount, failedCount, blocked, failed,
-        };
-        setSendSummary(summary);
-        setConfirmOpen(false);
-        if (confirmContext.action === "selected") setSelectedPlantIds(new Set());
-        if (Object.keys(lastSentAgg).length > 0) {
-          setLastSentMap((prev) => ({ ...prev, ...lastSentAgg }));
-        }
-        showToast(buildToastMessage(summary), failedCount > 0 || blockedCount > 0 ? "warning" : "success");
+        showToast(`Job ${data.status}: ${data.sent} sent, ${data.blocked} blocked, ${data.failed} failed.`, data.failed > 0 ? "warning" : "success");
       }
     } catch (err) {
-      showToast(err instanceof Error ? err.message : "Failed to send emails", "error");
+      showToast(String(err), "error");
     } finally {
-      isSendingRef.current = false;
-      setSending(false);
-      setSendProgress(null);
+      setRunning(false);
     }
-  };
+  }
 
-  const toastColors = {
+  const toastBg = {
     success: "bg-green-50 border-green-200 text-green-800",
     warning: "bg-amber-50 border-amber-200 text-amber-800",
     error: "bg-red-50 border-red-200 text-red-800",
@@ -279,227 +221,214 @@ export default function SendBulkInvoicePage() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
-      <div className="mx-auto max-w-6xl bg-white rounded-2xl shadow p-6">
-        {/* Toast */}
+      <div className="mx-auto max-w-6xl space-y-6">
         {toast && (
-          <div className={`mb-4 rounded-md border px-4 py-3 text-sm ${toastColors[toast.type]}`}>
+          <div className={`rounded-md border px-4 py-3 text-sm ${toastBg[toast.type]}`}>
             {toast.message}
           </div>
         )}
 
-        {/* Header */}
-        <div className="mb-4 flex flex-col gap-4">
-          <div className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
+        {/* Section 1: Date picker */}
+        <div className="bg-white rounded-2xl shadow p-6">
+          <h2 className="text-lg font-semibold text-gray-900 mb-1">Set Billing Cycle</h2>
+          <p className="text-sm text-gray-500 mb-4">
+            Set the billing period and scheduled send date. The end date is auto-suggested as one day before the start day in the following month.
+          </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <h3 className="text-lg font-semibold text-gray-900">Send Bulk Email Notification</h3>
-              <p className="text-sm text-gray-500">
-                Select subscribers and send the predefined payment reminder email via Mailgun.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-2">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Billing Start Date</label>
               <input
-                type="text"
-                placeholder="Search by Plant ID, Name, Email..."
-                className="min-w-[220px] border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Billing End Date</label>
+              <input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                min={startDate}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Scheduled Send Date</label>
+              <input
+                type="date"
+                value={scheduledSendDate}
+                onChange={(e) => setScheduledSendDate(e.target.value)}
+                min={today}
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 rounded-md border border-blue-200 bg-blue-50 p-3">
+          {dateError && (
+            <p className="mt-2 text-sm text-red-600">{dateError}</p>
+          )}
+
+          <div className="mt-4 flex items-center gap-4">
             <button
-              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg px-4 py-2"
-              disabled={sending || selectedPlantIds.size === 0}
-              onClick={() => openConfirmation("selected")}
+              onClick={handleSetCycle}
+              disabled={!canSetCycle || savingJob}
+              className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg px-5 py-2"
             >
-              Send to Selected ({selectedPlantIds.size})
+              {savingJob ? "Saving…" : "Set Billing Cycle"}
             </button>
-            <button
-              className="border border-blue-600 text-blue-600 hover:bg-blue-50 disabled:opacity-50 text-sm font-medium rounded-lg px-4 py-2"
-              disabled={sending || subscribers.length === 0}
-              onClick={() => openConfirmation("all")}
-            >
-              Send to All ({subscribers.length})
-            </button>
+
+            <div className="text-sm text-gray-500">
+              {currentJob ? (
+                <span className="text-gray-700">
+                  Current billing cycle:{" "}
+                  <strong>{formatDisplayDate(currentJob.startDate)} – {formatDisplayDate(currentJob.endDate)}</strong>
+                  {" | "}Scheduled send: <strong>{formatDisplayDate(currentJob.scheduledSendDate)}</strong>
+                </span>
+              ) : (
+                <span className="text-amber-600">No billing cycle determined yet</span>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* Table */}
-        <div className="overflow-auto max-h-[60vh] rounded-lg border border-gray-200">
-          <table className="w-full text-sm divide-y divide-gray-200">
-            <thead className="sticky top-0 bg-gray-50">
-              <tr>
-                <th className="px-4 py-3 w-10">
-                  <input
-                    ref={selectAllRef}
-                    type="checkbox"
-                    checked={allFilteredSelected}
-                    onChange={toggleSelectAll}
-                    disabled={selectableFilteredIds.length === 0}
-                    className="h-4 w-4 rounded border-gray-300"
-                  />
-                </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider text-xs">Plant ID</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider text-xs">Customer Name</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider text-xs">Email</th>
-                <th className="px-4 py-3 text-left font-medium text-gray-500 uppercase tracking-wider text-xs">Last Sent</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100 bg-white">
-              {filteredSubscribers.length > 0 ? (
-                filteredSubscribers.map((s) => {
-                  const recipient = toRecipient(s);
-                  const disabled = !recipient;
-                  return (
-                    <tr key={s.plant_id} className={disabled ? "bg-amber-50" : "hover:bg-gray-50"}>
-                      <td className="px-4 py-3">
-                        <input
-                          type="checkbox"
-                          checked={selectedPlantIds.has(s.plant_id)}
-                          onChange={() => toggleSelection(s.plant_id)}
-                          disabled={disabled}
-                          className="h-4 w-4 rounded border-gray-300 disabled:opacity-50 disabled:cursor-not-allowed"
-                        />
-                      </td>
-                      <td className="px-4 py-3 text-gray-900">{s.plant_id || "-"}</td>
-                      <td className="px-4 py-3 text-gray-900">{s.name || "-"}</td>
-                      <td className="px-4 py-3 text-gray-500">{s.email || <span className="text-amber-600 text-xs">No email</span>}</td>
-                      <td className="px-4 py-3 text-gray-500">{formatLastSent(lastSentMap[s.plant_id])}</td>
-                    </tr>
-                  );
-                })
-              ) : (
-                <tr>
-                  <td colSpan={5} className="px-4 py-16 text-center text-gray-400">
-                    {subscribers.length === 0 ? "No subscribers found." : "No subscribers match your search."}
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-
-        {/* Send Summary */}
-        {sendSummary && (
-          <div className="mt-4 rounded-md border border-gray-200 bg-gray-50 p-4">
-            <h4 className="font-semibold text-gray-900 mb-2">Last Send Result</h4>
-            <div className="flex flex-wrap gap-4 text-sm">
-              <span>Requested: {sendSummary.totalRequested}</span>
-              <span>Eligible: {sendSummary.eligibleCount}</span>
-              <span className="text-amber-700">Blocked: {sendSummary.blockedCount}</span>
-              <span className="text-green-700">Successful: {sendSummary.successCount}</span>
-              <span className="text-red-700">Failed: {sendSummary.failedCount}</span>
+        {/* Section 2: Job card */}
+        {!loadingJob && currentJob && (
+          <div className="bg-white rounded-2xl shadow p-6">
+            <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+              <div>
+                <h3 className="text-base font-semibold text-gray-900">Scheduled Job</h3>
+                <p className="text-sm text-gray-500">
+                  {formatDisplayDate(currentJob.startDate)} – {formatDisplayDate(currentJob.endDate)}
+                </p>
+              </div>
+              <span className={`inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ${STATUS_COLORS[currentJob.status] ?? "bg-gray-100 text-gray-700"}`}>
+                {currentJob.status}
+              </span>
             </div>
 
-            {sendSummary.blocked.length > 0 && (
-              <div className="mt-3 max-h-48 overflow-y-auto rounded border border-amber-200 bg-white p-2">
-                <p className="mb-1 text-sm font-medium text-amber-700">Blocked Recipients</p>
-                <ul className="space-y-1 text-xs text-amber-700">
-                  {sendSummary.blocked.map((b, i) => (
-                    <li key={`${b.plantId}-${i}`}>
-                      {b.customerName || "-"}{b.plantId ? ` (Plant ${b.plantId})` : ""} — {b.reason || b.reasonCode}
-                    </li>
-                  ))}
-                </ul>
+            {runResult && (
+              <div className="mb-4 rounded-md bg-gray-50 border border-gray-200 p-3 text-sm text-gray-700 flex flex-wrap gap-4">
+                {runResult.isTest && <span className="font-semibold text-purple-700">[TEST] </span>}
+                <span>Sent: <strong className="text-green-700">{runResult.sent}</strong></span>
+                <span>Blocked: <strong className="text-amber-700">{runResult.blocked}</strong></span>
+                <span>Failed: <strong className="text-red-700">{runResult.failed}</strong></span>
               </div>
             )}
 
-            {sendSummary.failed.length > 0 && (
-              <div className="mt-3 max-h-48 overflow-y-auto rounded border border-red-200 bg-white p-2">
-                <p className="mb-1 text-sm font-medium text-red-700">Failed Recipients</p>
-                <ul className="space-y-1 text-xs text-red-700">
-                  {sendSummary.failed.map((f) => (
-                    <li key={`${f.email}-${f.plantId}`}>
-                      {f.email}{f.plantId ? ` (Plant ${f.plantId})` : ""} — {f.error || "Unknown error"}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={() => handleRun(false)}
+                disabled={running || currentJob.status === "Running"}
+                className="bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-medium rounded-lg px-4 py-2"
+              >
+                {running ? "Running…" : "Run Now"}
+              </button>
+              <button
+                onClick={() => handleRun(true)}
+                disabled={running || currentJob.status === "Running"}
+                className="border border-purple-600 text-purple-600 hover:bg-purple-50 disabled:opacity-50 text-sm font-medium rounded-lg px-4 py-2"
+              >
+                Test Send
+              </button>
+              <button
+                onClick={() => router.push("/bulk-invoice-send-history")}
+                className="border border-gray-300 text-gray-700 hover:bg-gray-50 text-sm font-medium rounded-lg px-4 py-2"
+              >
+                Send History
+              </button>
+            </div>
           </div>
         )}
-      </div>
 
-      {/* Confirm Modal */}
-      <Modal open={confirmOpen} setOpen={setConfirmOpen} closeBtn={!sending}>
-        <div className="w-full max-w-2xl">
-          <h3 className="text-lg font-semibold text-gray-900">Confirm Bulk Reminder Email</h3>
-
-          {!sending && confirmContext && (
-            <>
-              <p className="mt-2 text-sm text-gray-600">
-                Sending reminder emails to <strong>{confirmContext.recipients.length}</strong> subscriber{confirmContext.recipients.length !== 1 ? "s" : ""}:
-              </p>
-              {confirmContext.skippedNoEmail > 0 && (
-                <p className="mt-1 text-sm text-amber-700">
-                  Skipped (no valid email): <strong>{confirmContext.skippedNoEmail}</strong>
-                </p>
-              )}
-              <div className="mt-3 max-h-64 overflow-y-auto rounded border border-gray-200">
-                <table className="w-full text-sm">
-                  <thead className="sticky top-0 bg-gray-50 text-xs uppercase text-gray-500">
+        {/* Section 3: Eligible subscribers */}
+        {billingRange && (
+          <>
+            <div className="bg-white rounded-2xl shadow p-6">
+              <h3 className="text-base font-semibold text-gray-900 mb-3">
+                Eligible Subscribers ({eligible.length})
+              </h3>
+              <div className="overflow-auto rounded-lg border border-gray-200">
+                <table className="w-full text-sm divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
                     <tr>
-                      <th className="px-3 py-2 text-left">Customer</th>
-                      <th className="px-3 py-2 text-left">Plant ID</th>
-                      <th className="px-3 py-2 text-left">Email(s)</th>
-                      <th className="px-3 py-2 text-left">Last Sent</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Plant ID</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Customer Name</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-gray-100">
-                    {confirmContext.recipients.map((r) => (
-                      <tr key={r.plantId || r.emails[0]}>
-                        <td className="px-3 py-2 font-medium text-gray-900">{r.customerName}</td>
-                        <td className="px-3 py-2 text-gray-900">{r.plantId}</td>
-                        <td className="px-3 py-2 text-gray-900 break-all">{r.emails.join(", ")}</td>
-                        <td className="px-3 py-2 text-gray-900">{r.plantId ? formatLastSent(lastSentMap[r.plantId]) : "-"}</td>
+                  <tbody className="divide-y divide-gray-100 bg-white">
+                    {eligible.length > 0 ? eligible.map((s) => (
+                      <tr key={s.plant_id} className="hover:bg-gray-50">
+                        <td className="px-4 py-3 text-gray-900 font-mono">{s.plant_id}</td>
+                        <td className="px-4 py-3 text-gray-900">{s.name}</td>
+                        <td className="px-4 py-3 text-gray-500">{s.email}</td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => router.push(`/single-user-bulk-invoice-history?plantId=${s.plant_id}`)}
+                            className="text-xs text-blue-600 hover:underline font-medium"
+                          >
+                            Bulk Send History
+                          </button>
+                        </td>
                       </tr>
-                    ))}
+                    )) : (
+                      <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">No eligible subscribers</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>
-            </>
-          )}
-
-          {sending && sendProgress && (
-            <div className="mt-4">
-              <div className="mb-3 flex items-center justify-between">
-                <p className="text-sm font-semibold text-gray-900">Processing {sendProgress.chunkSize} recipients…</p>
-                <button
-                  onClick={() => { isCancelledRef.current = true; setConfirmOpen(false); }}
-                  className="border border-gray-300 text-gray-700 text-sm rounded-lg px-3 py-1"
-                >
-                  Cancel
-                </button>
-              </div>
-              <div className="h-3 w-full overflow-hidden rounded-full bg-gray-100">
-                <div
-                  className="h-full rounded-full bg-sky-500 transition-all duration-500"
-                  style={{ width: sendProgress.total > 0 ? `${(sendProgress.done / sendProgress.total) * 100}%` : "0%" }}
-                />
-              </div>
-              <p className="mt-2 text-sm text-gray-600">{sendProgress.done} of {sendProgress.total} sent</p>
             </div>
-          )}
 
-          {!sending && (
-            <div className="mt-4 flex justify-end gap-3 border-t pt-4">
-              <button
-                className="border border-gray-300 text-gray-700 text-sm font-medium rounded-lg px-4 py-2"
-                onClick={() => setConfirmOpen(false)}
-              >
-                Back
-              </button>
-              <button
-                className="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg px-4 py-2"
-                onClick={handleSend}
-              >
-                Confirm &amp; Send
-              </button>
+            {/* Section 4: Blocked subscribers */}
+            <div className="bg-amber-50 rounded-2xl shadow p-6">
+              <h3 className="text-base font-semibold text-amber-900 mb-3">
+                Blocked Subscribers ({blocked.length})
+              </h3>
+              <div className="overflow-auto rounded-lg border border-amber-200">
+                <table className="w-full text-sm divide-y divide-amber-100">
+                  <thead className="bg-amber-100">
+                    <tr>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Plant ID</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Customer Name</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Email</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Reason</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Missing Dates</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-amber-100 bg-amber-50">
+                    {blocked.length > 0 ? blocked.map((s) => (
+                      <tr key={s.plant_id}>
+                        <td className="px-4 py-3 text-amber-900 font-mono">{s.plant_id}</td>
+                        <td className="px-4 py-3 text-amber-900">{s.name}</td>
+                        <td className="px-4 py-3 text-amber-700">{s.email || <span className="text-red-600 text-xs">No email</span>}</td>
+                        <td className="px-4 py-3 text-amber-700 text-xs">{s.reason}</td>
+                        <td className="px-4 py-3 text-amber-700 text-xs max-w-[200px]">
+                          {s.missingDates.length > 0 ? s.missingDates.join(", ") : "—"}
+                        </td>
+                        <td className="px-4 py-3">
+                          <button
+                            onClick={() => router.push(`/single-user-bulk-invoice-history?plantId=${s.plant_id}`)}
+                            className="text-xs text-amber-800 hover:underline font-medium"
+                          >
+                            Bulk Send History
+                          </button>
+                        </td>
+                      </tr>
+                    )) : (
+                      <tr><td colSpan={6} className="px-4 py-8 text-center text-amber-400">No blocked subscribers</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          )}
-        </div>
-      </Modal>
+          </>
+        )}
+      </div>
     </div>
   );
 }
