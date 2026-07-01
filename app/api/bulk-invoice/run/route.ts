@@ -7,7 +7,8 @@ import { v4 as uuidv4 } from "uuid";
 import { adminApp } from "@/lib/firebase/admin";
 import { MOCK_SUBSCRIBERS, MockSubscriber } from "@/lib/mock/subscribers";
 import { getMissingDates, isSubscriberEligible } from "@/lib/mock/generation";
-import { calculateBilling, BillingCalculation } from "@/lib/invoice/calculate-billing";
+import { calculateBilling } from "@/lib/invoice/calculate-billing";
+import type { BillingCalculation } from "@/lib/invoice/calculate-billing";
 import { getTokenData, createPaymentIntentURL } from "@/lib/payex/payex.service";
 import { generateInvoicePDF } from "@/lib/invoice/generate-pdf";
 import { buildInvoiceEmailHtml } from "@/lib/invoice/email-template";
@@ -22,6 +23,7 @@ interface SubscriberResult {
   invoiceNumber?: string;
   payexPaymentURL?: string;
   error?: string;
+  billing?: BillingCalculation;
 }
 
 interface JobDocument {
@@ -216,6 +218,7 @@ async function processSubscriber(
     status: "sent",
     invoiceNumber: billing.invoiceNumber,
     payexPaymentURL,
+    billing,
   };
 }
 
@@ -265,110 +268,134 @@ export async function POST(req: NextRequest) {
 
     const { startDate, endDate } = job;
 
-    // Get PayEx token (fail gracefully)
-    let payexToken: string | null = null;
     try {
-      const tokenData = await getTokenData(process.env.PAYEX_TOKEN ?? "");
-      payexToken = tokenData.access_token;
-    } catch {
-      console.warn("[run] PayEx token fetch failed — payment links will be placeholder");
-    }
-
-    // Process all subscribers in chunks of CHUNK_SIZE
-    const allResults: SubscriberResult[] = [];
-    const chunks = chunkArray(MOCK_SUBSCRIBERS, CHUNK_SIZE);
-
-    for (const chunk of chunks) {
-      const chunkResults = await Promise.all(
-        chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken))
-      );
-      allResults.push(...chunkResults);
-    }
-
-    // Tally results
-    const sent = allResults.filter((r) => r.status === "sent");
-    const failed = allResults.filter((r) => r.status === "failed");
-    const blocked = allResults.filter((r) => r.status === "blocked");
-    const eligible = allResults.filter((r) => r.status !== "blocked");
-
-    const finalStatus: "Completed" | "Partially Completed" | "Failed" =
-      sent.length === eligible.length && failed.length === 0
-        ? "Completed"
-        : sent.length === 0 && failed.length > 0
-        ? "Failed"
-        : "Partially Completed";
-
-    const logId = uuidv4();
-    const now = new Date().toISOString();
-
-    const logDoc = {
-      logId,
-      jobId: job.jobId,
-      isTest,
-      startDate,
-      endDate,
-      scheduledSendDate: job.scheduledSendDate,
-      runAt: now,
-      status: finalStatus,
-      totalProcessed: allResults.length,
-      sent: sent.length,
-      failed: failed.length,
-      blocked: blocked.length,
-      results: allResults,
-    };
-
-    // Always write to bulkInvoiceLogs (including test runs)
-    await db.collection("bulkInvoiceLogs").doc(logId).set(logDoc);
-
-    // Only update job status and billing history for non-test runs
-    if (!isTest) {
-      // Write billing history for each successfully sent invoice
-      const batch = db.batch();
-
-      for (const result of sent) {
-        const billing = calculateBilling(result.plantId, startDate, endDate);
-        const docRef = db
-          .collection("solsGreenBillingHistoryAdmin")
-          .doc(result.plantId)
-          .collection("billingHistory")
-          .doc(billing.billingYearMonth);
-
-        batch.set(
-          docRef,
-          {
-            ...billing,
-            billStatus: "sent_to_user",
-            payexPaymentURL: result.payexPaymentURL ?? null,
-            updatedAt: now,
-            updatedAtTs: Date.now(),
-          },
-          { merge: true }
-        );
+      // Get PayEx token (fail gracefully)
+      let payexToken: string | null = null;
+      try {
+        const tokenData = await getTokenData(process.env.PAYEX_TOKEN ?? "");
+        payexToken = tokenData.access_token;
+      } catch {
+        console.warn("[run] PayEx token fetch failed — payment links will be placeholder");
       }
 
-      await batch.commit();
+      // Process all subscribers in chunks of CHUNK_SIZE
+      const allResults: SubscriberResult[] = [];
+      const chunks = chunkArray(MOCK_SUBSCRIBERS, CHUNK_SIZE);
 
-      await jobDoc.ref.update({
+      for (const chunk of chunks) {
+        const chunkResults = await Promise.all(
+          chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken))
+        );
+        allResults.push(...chunkResults);
+      }
+
+      // Tally results
+      const sent = allResults.filter((r) => r.status === "sent");
+      const failed = allResults.filter((r) => r.status === "failed");
+      const blocked = allResults.filter((r) => r.status === "blocked");
+      const eligible = allResults.filter((r) => r.status !== "blocked");
+
+      const finalStatus: "Completed" | "Partially Completed" | "Failed" =
+        sent.length === eligible.length && failed.length === 0
+          ? "Completed"
+          : sent.length === 0 && failed.length > 0
+          ? "Failed"
+          : "Partially Completed";
+
+      const logId = uuidv4();
+      const now = new Date().toISOString();
+
+      const logDoc = {
+        logId,
+        jobId: job.jobId,
+        isTest,
+        startDate,
+        endDate,
+        scheduledSendDate: job.scheduledSendDate,
+        runAt: now,
         status: finalStatus,
-        updatedAt: now,
-        totalSubscribers: allResults.length,
-        eligibleCount: eligible.length,
-        blockedCount: blocked.length,
-        successCount: sent.length,
-        failedCount: failed.length,
-        latestLogId: logId,
-      });
-    }
+        totalProcessed: allResults.length,
+        sent: sent.length,
+        failed: failed.length,
+        blocked: blocked.length,
+        results: allResults,
+      };
 
-    return NextResponse.json({
-      logId,
-      isTest,
-      status: finalStatus,
-      totalProcessed: allResults.length,
-      sent: sent.length,
-      failed: failed.length,
-      blocked: blocked.length,
-    });
+      // Always write to bulkInvoiceLogs (including test runs)
+      await db.collection("bulkInvoiceLogs").doc(logId).set(logDoc);
+
+      // Only update job status and billing history for non-test runs
+      if (!isTest) {
+        // Write billing history for each successfully sent invoice
+        const batch = db.batch();
+
+        for (const result of sent) {
+          const billing = result.billing!;
+          const docRef = db
+            .collection("solsGreenBillingHistoryAdmin")
+            .doc(result.plantId)
+            .collection("billingHistory")
+            .doc(billing.billingYearMonth);
+
+          batch.set(
+            docRef,
+            {
+              ...billing,
+              billStatus: "sent_to_user",
+              payexPaymentURL: result.payexPaymentURL ?? null,
+              updatedAt: now,
+              updatedAtTs: Date.now(),
+            },
+            { merge: true }
+          );
+        }
+
+        await batch.commit();
+
+        await jobDoc.ref.update({
+          status: finalStatus,
+          updatedAt: now,
+          totalSubscribers: allResults.length,
+          eligibleCount: eligible.length,
+          blockedCount: blocked.length,
+          successCount: sent.length,
+          failedCount: failed.length,
+          latestLogId: logId,
+        });
+      }
+
+      return NextResponse.json({
+        logId,
+        isTest,
+        status: finalStatus,
+        totalProcessed: allResults.length,
+        sent: sent.length,
+        failed: failed.length,
+        blocked: blocked.length,
+      });
+    } catch (innerErr) {
+      console.error("[run] Processing failed:", innerErr);
+      if (!isTest) {
+        try {
+          const failLogId = uuidv4();
+          await db.collection("bulkInvoiceLogs").doc(failLogId).set({
+            logId: failLogId,
+            jobId: job.jobId,
+            isTest,
+            startDate,
+            endDate,
+            scheduledSendDate: job.scheduledSendDate,
+            runAt: new Date().toISOString(),
+            status: "Failed",
+            error: String(innerErr),
+          });
+        } catch (logErr) {
+          console.error("[run] Failed to write failure log:", logErr);
+        }
+        await jobDoc.ref.update({ status: "Failed", updatedAt: new Date().toISOString() });
+      }
+      throw innerErr;
+    }
   } catch (err) {
     console.error("[run]", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });

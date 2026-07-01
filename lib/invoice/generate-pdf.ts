@@ -98,7 +98,10 @@ export async function generateInvoicePDF(params: InvoicePDFParams): Promise<Uint
   drawText(page, "Subtotal:", totalsX, y, regular, 10, gray);
   drawText(page, `RM ${billing.subtotal.toFixed(2)}`, 490, y, regular, 10, black);
   y -= 14;
-  drawText(page, `SST (${(0.032 * 100).toFixed(1)}%):`, totalsX, y, regular, 10, gray);
+  const sstPercent = billing.sstAmount > 0 && billing.subtotal > 0
+    ? ((billing.sstAmount / billing.subtotal) * 100).toFixed(1)
+    : "3.2";
+  drawText(page, `SST (${sstPercent}%):`, totalsX, y, regular, 10, gray);
   drawText(page, `RM ${billing.sstAmount.toFixed(2)}`, 490, y, regular, 10, black);
   y -= 14;
 

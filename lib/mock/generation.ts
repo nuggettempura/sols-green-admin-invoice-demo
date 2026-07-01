@@ -5,9 +5,6 @@ export interface DayReading {
   flags: string[];
 }
 
-// Eligible plant IDs — all days produce energy
-const ELIGIBLE_PLANT_IDS = new Set(["1001", "1002", "1003", "1006", "1007", "1008"]);
-
 // Energy seed per plant (kWh base, varied deterministically)
 const PLANT_ENERGY_SEED: Record<string, number> = {
   "1001": 12.4,
