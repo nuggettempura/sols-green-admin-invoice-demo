@@ -1,6 +1,6 @@
 // app/api/bulk-invoice/run/route.ts
 import { NextRequest, NextResponse } from "next/server";
-import { getFirestore, FieldValue } from "firebase-admin/firestore";
+import { getFirestore } from "firebase-admin/firestore";
 import Mailgun from "mailgun.js";
 import FormData from "form-data";
 import { v4 as uuidv4 } from "uuid";
@@ -218,9 +218,6 @@ async function processSubscriber(
     payexPaymentURL,
   };
 }
-
-// Suppress unused import warning — FieldValue is available for future use
-void FieldValue;
 
 export async function POST(req: NextRequest) {
   const { searchParams } = req.nextUrl;
