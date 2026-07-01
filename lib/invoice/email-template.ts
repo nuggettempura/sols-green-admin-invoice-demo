@@ -10,55 +10,41 @@ export interface InvoiceEmailParams {
 }
 
 export function buildInvoiceEmailHtml(params: InvoiceEmailParams): string {
-  const { customerName, invoiceNumber, billingPeriod, totalAmount, dueDate, paymentURL } = params;
+  const { customerName, invoiceNumber, billingPeriod, paymentURL } = params;
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Your Invoice from SOLS Energy</title></head>
-<body style="font-family: Arial, sans-serif; background: #f4f6f9; margin: 0; padding: 20px;">
-  <div style="max-width: 600px; margin: auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
-    <div style="background: #0a5cbf; padding: 24px 32px;">
-      <h1 style="color: white; margin: 0; font-size: 22px;">SOLS Energy</h1>
-      <p style="color: #cce0ff; margin: 4px 0 0; font-size: 13px;">Monthly Home Solar Subscription Invoice</p>
-    </div>
-    <div style="padding: 32px;">
-      <p style="color: #333; font-size: 15px;">Dear <strong>${customerName}</strong>,</p>
-      <p style="color: #555; font-size: 14px;">
-        Please find your invoice for your Home Solar Subscription below.
-      </p>
-      <table style="width: 100%; border-collapse: collapse; margin: 24px 0; font-size: 14px;">
-        <tr style="background: #f0f4ff;">
-          <td style="padding: 10px 14px; font-weight: bold; color: #555; width: 40%;">Invoice Number</td>
-          <td style="padding: 10px 14px; color: #111;">${invoiceNumber}</td>
-        </tr>
-        <tr>
-          <td style="padding: 10px 14px; font-weight: bold; color: #555;">Billing Period</td>
-          <td style="padding: 10px 14px; color: #111;">${billingPeriod}</td>
-        </tr>
-        <tr style="background: #f0f4ff;">
-          <td style="padding: 10px 14px; font-weight: bold; color: #555;">Amount Due</td>
-          <td style="padding: 10px 14px; color: #111; font-size: 16px; font-weight: bold;">${totalAmount}</td>
-        </tr>
-        <tr>
-          <td style="padding: 10px 14px; font-weight: bold; color: #555;">Due Date</td>
-          <td style="padding: 10px 14px; color: #c0392b;">${dueDate}</td>
-        </tr>
-      </table>
-      <div style="text-align: center; margin: 32px 0;">
-        <a href="${paymentURL}"
-           style="display: inline-block; background: #0a5cbf; color: white; padding: 14px 36px; border-radius: 6px; text-decoration: none; font-size: 15px; font-weight: bold;">
-          Pay Now
-        </a>
-        <p style="color: #999; font-size: 12px; margin-top: 12px;">
-          Or copy this link: <a href="${paymentURL}" style="color: #0a5cbf;">${paymentURL}</a>
-        </p>
-      </div>
-      <p style="color: #888; font-size: 12px; margin-top: 24px; border-top: 1px solid #eee; padding-top: 16px;">
-        The invoice PDF is attached to this email. If you have questions, please contact support@sols247.org.
-      </p>
-    </div>
-  </div>
-</body>
-</html>`;
+  const paymentBlock = paymentURL
+    ? `<div style="margin: 24px 0; padding: 20px; background-color: #f8f9fa; border-radius: 8px; border-left: 4px solid #28a745;">
+  <p style="margin: 0 0 12px 0; font-weight: bold; color: #333;">Pay Your Invoice Online</p>
+  <p style="margin: 0 0 16px 0; color: #666;">Click the button below to make a secure payment:</p>
+  <a href="${paymentURL}" target="_blank" style="display: inline-block; padding: 12px 24px; background-color: #28a745; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: bold;">Pay Now</a>
+  <p style="margin: 16px 0 0 0; font-size: 12px; color: #888;">Or copy this link: <a href="${paymentURL}" style="color: #007bff; word-break: break-all;">${paymentURL}</a></p>
+</div>`
+    : "";
+
+  return `<html><body style="font-family: Arial, sans-serif; font-size: 14px; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+<p>Dear ${customerName},</p>
+
+<p>We trust this message finds you in good health. We sincerely appreciate your ongoing commitment to sustainable energy with us. Enclosed, please find your monthly solar generation invoice <strong>${invoiceNumber}</strong> for <strong>${billingPeriod}</strong>.</p>
+
+<p>
+<strong>Important Notice:</strong><br>
+Please be informed that, effective immediately, the recipient name displayed on the payment page and payment link will be changed from Gentari Suria Resi Sdn. Bhd to SOLS Green Fintech Sdn. Bhd. This is an administrative update only and does not affect your solar subscription, billing amount, or payment process. Kindly proceed with your payment as usual when you see SOLS Green Fintech Sdn Bhd as the payment recipient.
+</p>
+
+${paymentBlock}
+
+<p>Once you are on the secure payment page, kindly follow the steps below:</p>
+<ol>
+  <li>Click on the designated blue box.</li>
+  <li>Select your preferred bank type and then choose your bank.</li>
+  <li>Proceed to complete your payment.</li>
+</ol>
+
+<p>For any inquiries or assistance regarding your invoice or solar generation, our dedicated customer support team is at your service. Reach out to us via email at <strong>support@solsenergy.com</strong> or through WhatsApp at <strong>+60183555247</strong>.</p>
+<p>We appreciate your cooperation in this matter. Together, we are making a significant positive impact on the environment.</p>
+<p>Thank you for choosing sustainable energy.</p>
+<p style="margin-bottom: 0;">Regards,</p>
+<p style="margin-top: 0; margin-bottom: 0;">Billing Team</p>
+<p style="margin-top: 0;">SOLS Green Fintech</p>
+</body></html>`;
 }
