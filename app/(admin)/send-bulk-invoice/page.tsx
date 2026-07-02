@@ -235,7 +235,7 @@ export default function SendBulkInvoicePage() {
                 type="date"
                 value={startDate}
                 onChange={(e) => setStartDate(e.target.value)}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
               />
             </div>
             <div>
@@ -245,7 +245,7 @@ export default function SendBulkInvoicePage() {
                 value={endDate}
                 onChange={(e) => setEndDate(e.target.value)}
                 min={startDate}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
               />
             </div>
             <div>
@@ -255,7 +255,7 @@ export default function SendBulkInvoicePage() {
                 value={scheduledSendDate}
                 onChange={(e) => setScheduledSendDate(e.target.value)}
                 min={today}
-                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900"
               />
             </div>
           </div>
@@ -362,7 +362,7 @@ export default function SendBulkInvoicePage() {
                         <td className="px-4 py-3">
                           <button
                             onClick={() => router.push(`/single-user-bulk-invoice-history?plantId=${s.plant_id}`)}
-                            className="text-xs text-blue-600 hover:underline font-medium"
+                            className="text-xs text-blue-600 hover:underline font-medium cursor-pointer"
                           >
                             Bulk Send History
                           </button>
@@ -377,28 +377,28 @@ export default function SendBulkInvoicePage() {
             </div>
 
             {/* Section 4: Blocked subscribers */}
-            <div className="bg-amber-50 rounded-2xl shadow p-6">
+            <div className="bg-red-50 rounded-2xl shadow p-6">
               <h3 className="text-base font-semibold text-amber-900 mb-3">
                 Blocked Subscribers ({blocked.length})
               </h3>
-              <div className="overflow-auto rounded-lg border border-amber-200">
+              <div className="overflow-auto rounded-lg border border-red-200">
                 <table className="w-full text-sm divide-y divide-amber-100">
-                  <thead className="bg-amber-100">
+                  <thead className="bg-red-100">
                     <tr>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Plant ID</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Customer Name</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Email</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Reason</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Missing Dates</th>
-                      <th className="px-4 py-3 text-left text-xs font-medium text-amber-700 uppercase tracking-wider">Actions</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-red-700 uppercase tracking-wider">Plant ID</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-red-700 uppercase tracking-wider">Customer Name</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-red-700 uppercase tracking-wider">Email</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-red-700 uppercase tracking-wider">Reason</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-red-700 uppercase tracking-wider">Missing Dates</th>
+                      <th className="px-4 py-3 text-left text-xs font-medium text-red-700 uppercase tracking-wider">Actions</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-amber-100 bg-amber-50">
+                  <tbody className="divide-y divide-red-100 bg-red-50">
                     {blocked.length > 0 ? blocked.map((s) => (
                       <tr key={s.plant_id}>
                         <td className="px-4 py-3 text-amber-900 font-mono">{s.plant_id}</td>
                         <td className="px-4 py-3 text-amber-900">{s.name}</td>
-                        <td className="px-4 py-3 text-amber-700">{s.email || <span className="text-red-600 text-xs">No email</span>}</td>
+                        <td className="px-4 py-3 text-amber-700">{s.email || <span className="text-amber-600 text-xs">No email</span>}</td>
                         <td className="px-4 py-3 text-amber-700 text-xs">{s.reason}</td>
                         <td className="px-4 py-3 text-amber-700 text-xs max-w-[200px]">
                           {s.missingDates.length > 0 ? s.missingDates.join(", ") : "—"}
@@ -406,7 +406,7 @@ export default function SendBulkInvoicePage() {
                         <td className="px-4 py-3">
                           <button
                             onClick={() => router.push(`/single-user-bulk-invoice-history?plantId=${s.plant_id}`)}
-                            className="text-xs text-amber-800 hover:underline font-medium"
+                            className="text-xs text-amber-800 hover:underline font-medium cursor-pointer"
                           >
                             Bulk Send History
                           </button>
