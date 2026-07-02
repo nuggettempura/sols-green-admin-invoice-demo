@@ -4,6 +4,7 @@ import { getFirestore } from "firebase-admin/firestore";
 import Mailgun from "mailgun.js";
 import FormData from "form-data";
 import { v4 as uuidv4 } from "uuid";
+import puppeteer, { Browser } from "puppeteer";
 import { adminApp } from "@/lib/firebase/admin";
 import { MOCK_SUBSCRIBERS, MockSubscriber } from "@/lib/mock/subscribers";
 import { getMissingDates, isSubscriberEligible } from "@/lib/mock/generation";
@@ -106,7 +107,8 @@ async function processSubscriber(
   subscriber: MockSubscriber,
   startDate: string,
   endDate: string,
-  payexToken: string | null
+  payexToken: string | null,
+  browser: Browser
 ): Promise<SubscriberResult> {
   const plantId = subscriber.plant_id;
   const name = subscriber.name;
@@ -171,11 +173,14 @@ async function processSubscriber(
   // Generate PDF
   let pdfBytes: Uint8Array;
   try {
-    pdfBytes = await generateInvoicePDF({
-      subscriber: { plant_id: plantId, name, email },
-      billing,
-      paymentURL: payexPaymentURL,
-    });
+    pdfBytes = await generateInvoicePDF(
+      {
+        subscriber: { plant_id: plantId, name, email },
+        billing,
+        paymentURL: payexPaymentURL,
+      },
+      browser
+    );
   } catch (pdfErr) {
     return {
       plantId,
@@ -278,15 +283,21 @@ export async function POST(req: NextRequest) {
         console.warn("[run] PayEx token fetch failed — payment links will be placeholder");
       }
 
-      // Process all subscribers in chunks of CHUNK_SIZE
+      // Process all subscribers in chunks of CHUNK_SIZE, sharing one browser
+      // instance across the whole run to avoid launching Chromium per subscriber.
       const allResults: SubscriberResult[] = [];
       const chunks = chunkArray(MOCK_SUBSCRIBERS, CHUNK_SIZE);
+      const browser = await puppeteer.launch({ headless: true });
 
-      for (const chunk of chunks) {
-        const chunkResults = await Promise.all(
-          chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken))
-        );
-        allResults.push(...chunkResults);
+      try {
+        for (const chunk of chunks) {
+          const chunkResults = await Promise.all(
+            chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken, browser))
+          );
+          allResults.push(...chunkResults);
+        }
+      } finally {
+        await browser.close();
       }
 
       // Tally results

@@ -51,6 +51,30 @@ export const MOCK_SUBSCRIBERS: MockSubscriber[] = [
     name: "Mohamad Hafiz bin Osman",
     email: "", // no email — to test the "cannot receive" case
   },
+  // 1009-1030 — pads the roster past CHUNK_SIZE (20) so a bulk run exercises
+  // more than one chunk in app/api/bulk-invoice/run/route.ts.
+  { plant_id: "1009", name: "Chong Wei Ming", email: "chong.weiming@example.com" },
+  { plant_id: "1010", name: "Nurul Ain binti Zulkifli", email: "nurul.ain@example.com" },
+  { plant_id: "1011", name: "Tan Sri Ismail", email: "tan.ismail@example.com" },
+  { plant_id: "1012", name: "Priya Devi Ramasamy", email: "priya.devi@example.com" },
+  { plant_id: "1013", name: "Wong Chee Keong", email: "wong.cheekeong@example.com" },
+  { plant_id: "1014", name: "Siti Aminah binti Rahman", email: "siti.aminah@example.com" },
+  { plant_id: "1015", name: "Muhammad Aizat bin Yusof", email: "aizat.yusof@example.com" },
+  { plant_id: "1016", name: "Lee Mei Fen", email: "lee.meifen@example.com" },
+  { plant_id: "1017", name: "Karthik Subramaniam", email: "karthik.s@example.com" },
+  { plant_id: "1018", name: "Nor Hidayah binti Kamal", email: "nor.hidayah@example.com" },
+  { plant_id: "1019", name: "Goh Jun Wei", email: "goh.junwei@example.com" },
+  { plant_id: "1020", name: "Aisyah binti Mohd Nasir", email: "aisyah.nasir@example.com" },
+  { plant_id: "1021", name: "Vikram Singh Gill", email: "vikram.gill@example.com" },
+  { plant_id: "1022", name: "Chin Li Wen", email: "chin.liwen@example.com" },
+  { plant_id: "1023", name: "Amirul Hakim bin Zainal", email: "amirul.hakim@example.com" },
+  { plant_id: "1024", name: "Devaraj a/l Muthusamy", email: "devaraj.muthusamy@example.com" },
+  { plant_id: "1025", name: "Fatin Nabila binti Hashim", email: "fatin.nabila@example.com" },
+  { plant_id: "1026", name: "Ong Kai Xuan", email: "ong.kaixuan@example.com" },
+  { plant_id: "1027", name: "Haziq Danial bin Sulaiman", email: "haziq.danial@example.com" },
+  { plant_id: "1028", name: "Meera Krishnan", email: "meera.krishnan@example.com" },
+  { plant_id: "1029", name: "Teoh Boon Hock", email: "teoh.boonhock@example.com" },
+  { plant_id: "1030", name: "Zulaikha binti Sabri", email: "zulaikha.sabri@example.com" },
 ];
 
 // Mock billing records seeded into the Firestore emulator
