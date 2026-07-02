@@ -228,7 +228,7 @@ async function processSubscriber(
   };
 }
 
-export async function POST(req: NextRequest) {
+async function handleRun(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const force = searchParams.get("force") === "true";
   const isTest = searchParams.get("isTest") === "true";
@@ -423,4 +423,16 @@ export async function POST(req: NextRequest) {
     console.error("[run]", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
   }
+}
+
+// Vercel Cron invokes the scheduled path with an HTTP GET request, so the
+// automated path must be reachable via GET. The manual "Run Now" / "Test Send"
+// actions from the admin UI call this same route with POST (and force=true).
+// Both delegate to the shared handler.
+export async function GET(req: NextRequest) {
+  return handleRun(req);
+}
+
+export async function POST(req: NextRequest) {
+  return handleRun(req);
 }
