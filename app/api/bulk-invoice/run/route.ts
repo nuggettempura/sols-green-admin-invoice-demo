@@ -15,6 +15,10 @@ import { getTokenData, createPaymentIntentURL } from "@/lib/payex/payex.service"
 import { generateInvoicePDF } from "@/lib/invoice/generate-pdf";
 import { buildInvoiceEmailHtml } from "@/lib/invoice/email-template";
 
+// Headless-Chromium PDF generation for many subscribers needs far more than
+// Vercel's default 10s. 60s is the Hobby-plan ceiling (Pro allows up to 300s).
+export const maxDuration = 60;
+
 interface SubscriberResult {
   plantId: string;
   customerName: string;
