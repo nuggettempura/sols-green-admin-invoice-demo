@@ -4,7 +4,8 @@ import { getFirestore } from "firebase-admin/firestore";
 import Mailgun from "mailgun.js";
 import FormData from "form-data";
 import { v4 as uuidv4 } from "uuid";
-import puppeteer, { Browser } from "puppeteer";
+import type { Browser } from "puppeteer-core";
+import { launchBrowser } from "@/lib/invoice/launch-browser";
 import { adminApp } from "@/lib/firebase/admin";
 import { MOCK_SUBSCRIBERS, MockSubscriber } from "@/lib/mock/subscribers";
 import { getMissingDates, isSubscriberEligible } from "@/lib/mock/generation";
@@ -232,6 +233,17 @@ export async function POST(req: NextRequest) {
   const force = searchParams.get("force") === "true";
   const isTest = searchParams.get("isTest") === "true";
 
+  // Vercel Cron authenticates itself via `Authorization: Bearer $CRON_SECRET`.
+  // Manual "Run Now" / "Test Send" from the admin UI use `force=true` and
+  // aren't required to present this secret.
+  if (!force) {
+    const cronSecret = process.env.CRON_SECRET;
+    const authHeader = req.headers.get("authorization");
+    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+  }
+
   try {
     const db = getFirestore(adminApp);
 
@@ -287,7 +299,7 @@ export async function POST(req: NextRequest) {
       // instance across the whole run to avoid launching Chromium per subscriber.
       const allResults: SubscriberResult[] = [];
       const chunks = chunkArray(MOCK_SUBSCRIBERS, CHUNK_SIZE);
-      const browser = await puppeteer.launch({ headless: true });
+      const browser = await launchBrowser();
 
       try {
         for (const chunk of chunks) {

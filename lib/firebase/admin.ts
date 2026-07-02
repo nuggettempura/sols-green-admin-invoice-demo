@@ -11,12 +11,17 @@ try {
   throw new Error("Invalid SERVICE_ACCOUNT JSON: " + error);
 }
 
+const isEmulator = !!process.env.FIRESTORE_EMULATOR_HOST;
+
 export const adminApp: App =
   getApps().find((app) => app.name === "demo") ||
   initializeApp(
     {
       credential: cert(serviceAccount as Parameters<typeof cert>[0]),
-      projectId: "demo-no-project",
+      // The emulator doesn't validate project IDs, so a fixed placeholder is fine
+      // there. Against real Firestore, project ID must come from the service
+      // account credential itself (cert() infers it) rather than being hardcoded.
+      ...(isEmulator ? { projectId: "demo-no-project" } : {}),
     },
     "demo"
   );

@@ -1,7 +1,8 @@
 // lib/invoice/generate-pdf.ts
-import puppeteer, { Browser } from "puppeteer";
+import type { Browser } from "puppeteer-core";
 import { buildInvoiceHtml } from "./invoice-html-template";
 import type { BillingCalculation } from "./calculate-billing";
+import { launchBrowser } from "./launch-browser";
 
 export interface InvoicePDFParams {
   subscriber: { plant_id: string; name: string; email: string };
@@ -40,7 +41,7 @@ export async function generateInvoicePDF(
     return renderPdf(browser, html);
   }
 
-  const ownBrowser = await puppeteer.launch({ headless: true });
+  const ownBrowser = await launchBrowser();
   try {
     return await renderPdf(ownBrowser, html);
   } finally {

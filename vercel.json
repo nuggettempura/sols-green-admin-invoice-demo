@@ -2,7 +2,7 @@
   "crons": [
     {
       "path": "/api/bulk-invoice/run",
-      "schedule": "0 0 * * *"
+      "schedule": "30 3 * * *"
     }
   ]
 }
