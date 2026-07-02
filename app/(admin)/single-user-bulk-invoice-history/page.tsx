@@ -1,7 +1,7 @@
 // app/(admin)/single-user-bulk-invoice-history/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { MOCK_SUBSCRIBERS } from "@/lib/mock/subscribers";
 import { getDailyReadings } from "@/lib/mock/generation";
@@ -86,6 +86,14 @@ function buildBillingMonths(plantId: string, baseStartDate: string, monthsBack: 
 }
 
 export default function SingleUserBulkInvoiceHistoryPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-50" />}>
+      <SingleUserBulkInvoiceHistoryContent />
+    </Suspense>
+  );
+}
+
+function SingleUserBulkInvoiceHistoryContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const plantId = searchParams.get("plantId") ?? "";
