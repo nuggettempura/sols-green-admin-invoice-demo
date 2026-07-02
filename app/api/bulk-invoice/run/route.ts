@@ -1,6 +1,16 @@
 // app/api/bulk-invoice/run/route.ts
+//
+// Self-invoking cursor pattern:
+// Vercel Cron (or the admin UI) triggers the FIRST invocation, which processes
+// only CHUNK_SIZE subscribers and then fires an HTTP request to this same
+// route with an advanced cursor. Each chunk therefore runs in its own
+// serverless invocation with a fresh timeout, so total subscriber count is not
+// bounded by a single function's maxDuration. Progress (cursor, tallies,
+// per-subscriber results) is persisted on the bulkInvoiceLogs doc between
+// invocations; the final chunk writes the terminal status.
 import { NextRequest, NextResponse } from "next/server";
-import { getFirestore } from "firebase-admin/firestore";
+import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { waitUntil } from "@vercel/functions";
 import Mailgun from "mailgun.js";
 import FormData from "form-data";
 import { v4 as uuidv4 } from "uuid";
@@ -15,8 +25,9 @@ import { getTokenData, createPaymentIntentURL } from "@/lib/payex/payex.service"
 import { generateInvoicePDF } from "@/lib/invoice/generate-pdf";
 import { buildInvoiceEmailHtml } from "@/lib/invoice/email-template";
 
-// Headless-Chromium PDF generation for many subscribers needs far more than
-// Vercel's default 10s. 60s is the Hobby-plan ceiling (Pro allows up to 300s).
+// Headless-Chromium PDF generation needs far more than Vercel's default 10s.
+// 60s is the Hobby-plan ceiling (Pro allows up to 300s). Each chunk gets its
+// own fresh window of this duration.
 export const maxDuration = 60;
 
 interface SubscriberResult {
@@ -40,13 +51,29 @@ interface JobDocument {
   status: string;
 }
 
-const CHUNK_SIZE = 20;
-
-function chunkArray<T>(arr: T[], size: number): T[][] {
-  const chunks: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
-  return chunks;
+interface RunLogDocument {
+  logId: string;
+  jobId: string;
+  isTest: boolean;
+  startDate: string;
+  endDate: string;
+  scheduledSendDate: string;
+  runAt: string;
+  status: "Running" | "Completed" | "Partially Completed" | "Failed";
+  cursor: number;
+  totalSubscribers: number;
+  totalProcessed: number;
+  sent: number;
+  failed: number;
+  blocked: number;
+  results: SubscriberResult[];
+  error?: string;
 }
+
+// 10 concurrent headless-Chromium renders per invocation keeps memory well
+// under the serverless ceiling; more chunks is cheap since each chunk is its
+// own invocation.
+const CHUNK_SIZE = 10;
 
 function formatDate(dateStr: string): string {
   return new Date(dateStr + "T00:00:00Z").toLocaleDateString("en-MY", {
@@ -232,24 +259,238 @@ async function processSubscriber(
   };
 }
 
+/**
+ * Keeps a background promise alive after the response is sent. On Vercel this
+ * uses waitUntil; in local dev (where the request context may be missing) the
+ * promise simply continues running on the shared Node process.
+ */
+function runInBackground(promise: Promise<unknown>): void {
+  const guarded = promise.catch((err) => console.error("[run] background task failed:", err));
+  try {
+    waitUntil(guarded);
+  } catch {
+    void guarded;
+  }
+}
+
+/** Resolve the deployment's own base URL for self-triggering the next chunk. */
+function selfBaseUrl(req: NextRequest): string {
+  return process.env.NEXT_PUBLIC_BASE_URL ?? req.nextUrl.origin;
+}
+
+/** Fire the next chunk's invocation. Authenticated with CRON_SECRET. */
+async function triggerNextChunk(
+  baseUrl: string,
+  cursor: number,
+  logId: string,
+  isTest: boolean
+): Promise<void> {
+  const url = `${baseUrl}/api/bulk-invoice/run?cursor=${cursor}&logId=${encodeURIComponent(
+    logId
+  )}${isTest ? "&isTest=true" : ""}`;
+
+  const headers: Record<string, string> = {};
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret) headers["authorization"] = `Bearer ${cronSecret}`;
+
+  const res = await fetch(url, { method: "POST", headers });
+  if (!res.ok) {
+    throw new Error(`Failed to trigger next chunk (cursor=${cursor}): HTTP ${res.status}`);
+  }
+}
+
+/**
+ * Processes one chunk of subscribers, persists progress on the log doc, then
+ * either triggers the next chunk or finalizes the run.
+ */
+async function processChunk(
+  db: Firestore,
+  baseUrl: string,
+  logId: string,
+  cursor: number,
+  isTest: boolean
+): Promise<void> {
+  const logRef = db.collection("bulkInvoiceLogs").doc(logId);
+  const jobsRef = db.collection("bulkInvoiceJobs");
+
+  const logSnap = await logRef.get();
+  if (!logSnap.exists) {
+    console.error(`[run] Log ${logId} not found; dropping chunk cursor=${cursor}`);
+    return;
+  }
+  const log = logSnap.data() as RunLogDocument;
+
+  // Idempotency guard: only the invocation matching the persisted cursor may
+  // process. A stale/duplicate trigger (retry, double fire) exits silently.
+  if (log.status !== "Running" || log.cursor !== cursor) {
+    console.warn(
+      `[run] Skipping stale chunk: incoming cursor=${cursor}, log cursor=${log.cursor}, status=${log.status}`
+    );
+    return;
+  }
+
+  const { startDate, endDate, jobId } = log;
+
+  try {
+    // Get PayEx token (fail gracefully)
+    let payexToken: string | null = null;
+    try {
+      const tokenData = await getTokenData(process.env.PAYEX_TOKEN ?? "");
+      payexToken = tokenData.access_token;
+    } catch {
+      console.warn("[run] PayEx token fetch failed — payment links will be placeholder");
+    }
+
+    const chunk = MOCK_SUBSCRIBERS.slice(cursor, cursor + CHUNK_SIZE);
+
+    // One browser per invocation, shared across this chunk's subscribers.
+    const browser = await launchBrowser();
+    let chunkResults: SubscriberResult[];
+    try {
+      chunkResults = await Promise.all(
+        chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken, browser))
+      );
+    } finally {
+      await browser.close();
+    }
+
+    const now = new Date().toISOString();
+    const sent = chunkResults.filter((r) => r.status === "sent");
+    const failed = chunkResults.filter((r) => r.status === "failed");
+    const blocked = chunkResults.filter((r) => r.status === "blocked");
+
+    // Billing history for this chunk's sent invoices (non-test only)
+    if (!isTest && sent.length > 0) {
+      const batch = db.batch();
+      for (const result of sent) {
+        const billing = result.billing!;
+        const docRef = db
+          .collection("solsGreenBillingHistoryAdmin")
+          .doc(result.plantId)
+          .collection("billingHistory")
+          .doc(billing.billingYearMonth);
+
+        batch.set(
+          docRef,
+          {
+            ...billing,
+            billStatus: "sent_to_user",
+            payexPaymentURL: result.payexPaymentURL ?? null,
+            updatedAt: now,
+            updatedAtTs: Date.now(),
+          },
+          { merge: true }
+        );
+      }
+      await batch.commit();
+    }
+
+    // Persist progress. Strip the heavyweight billing object from stored
+    // results — the send-history UI doesn't need it.
+    const storedResults = chunkResults.map(({ billing: _billing, ...rest }) => rest);
+    const newCursor = cursor + chunk.length;
+    const done = newCursor >= log.totalSubscribers;
+
+    const newTallies = {
+      sent: log.sent + sent.length,
+      failed: log.failed + failed.length,
+      blocked: log.blocked + blocked.length,
+    };
+    const totalProcessed = log.totalProcessed + chunkResults.length;
+
+    if (!done) {
+      await logRef.update({
+        cursor: newCursor,
+        totalProcessed,
+        ...newTallies,
+        results: [...log.results, ...storedResults],
+      });
+
+      await triggerNextChunk(baseUrl, newCursor, logId, isTest);
+      return;
+    }
+
+    // Final chunk: compute terminal status from accumulated tallies.
+    const eligibleCount = newTallies.sent + newTallies.failed;
+    const finalStatus: RunLogDocument["status"] =
+      newTallies.failed === 0
+        ? "Completed"
+        : newTallies.sent === 0
+        ? "Failed"
+        : "Partially Completed";
+
+    await logRef.update({
+      cursor: newCursor,
+      totalProcessed,
+      ...newTallies,
+      results: [...log.results, ...storedResults],
+      status: finalStatus,
+    });
+
+    if (!isTest) {
+      await jobsRef.doc(jobId).update({
+        status: finalStatus,
+        updatedAt: now,
+        totalSubscribers: log.totalSubscribers,
+        eligibleCount,
+        blockedCount: newTallies.blocked,
+        successCount: newTallies.sent,
+        failedCount: newTallies.failed,
+        latestLogId: logId,
+      });
+    }
+  } catch (err) {
+    console.error(`[run] Chunk failed (cursor=${cursor}):`, err);
+    try {
+      await logRef.update({ status: "Failed", error: String(err) });
+      if (!isTest) {
+        await jobsRef
+          .doc(jobId)
+          .update({ status: "Failed", updatedAt: new Date().toISOString() });
+      }
+    } catch (persistErr) {
+      console.error("[run] Failed to persist chunk failure:", persistErr);
+    }
+  }
+}
+
 async function handleRun(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const force = searchParams.get("force") === "true";
   const isTest = searchParams.get("isTest") === "true";
+  const cursorParam = searchParams.get("cursor");
+  const logIdParam = searchParams.get("logId");
 
-  // Vercel Cron authenticates itself via `Authorization: Bearer $CRON_SECRET`.
-  // Manual "Run Now" / "Test Send" from the admin UI use `force=true` and
-  // aren't required to present this secret.
-  if (!force) {
-    const cronSecret = process.env.CRON_SECRET;
-    const authHeader = req.headers.get("authorization");
-    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-  }
+  const cronSecret = process.env.CRON_SECRET;
+  const authHeader = req.headers.get("authorization");
+  const hasValidSecret = !cronSecret || authHeader === `Bearer ${cronSecret}`;
 
   try {
     const db = getFirestore(adminApp);
+    const baseUrl = selfBaseUrl(req);
+
+    // ── Continuation invocation (self-triggered chunk) ──────────────────────
+    if (cursorParam !== null) {
+      if (!hasValidSecret) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+      const cursor = parseInt(cursorParam, 10);
+      if (!logIdParam || Number.isNaN(cursor) || cursor < 0) {
+        return NextResponse.json({ error: "Invalid cursor/logId" }, { status: 400 });
+      }
+
+      // Respond immediately; the chunk runs in the background with this
+      // invocation's own fresh maxDuration window.
+      runInBackground(processChunk(db, baseUrl, logIdParam, cursor, isTest));
+      return NextResponse.json({ accepted: true, cursor, logId: logIdParam });
+    }
+
+    // ── First invocation (Vercel Cron, or manual Run Now / Test Send) ───────
+    // Vercel Cron authenticates via `Authorization: Bearer $CRON_SECRET`.
+    // Manual UI calls use `force=true` and aren't required to present it.
+    if (!force && !hasValidSecret) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
 
     // Load the most recent job
     const jobSnap = await db
@@ -282,147 +523,50 @@ async function handleRun(req: NextRequest) {
       return NextResponse.json({ error: "Job is already running" }, { status: 409 });
     }
 
+    const { startDate, endDate } = job;
+    const logId = uuidv4();
+    const now = new Date().toISOString();
+
+    const logDoc: RunLogDocument = {
+      logId,
+      jobId: job.jobId,
+      isTest,
+      startDate,
+      endDate,
+      scheduledSendDate: job.scheduledSendDate,
+      runAt: now,
+      status: "Running",
+      cursor: 0,
+      totalSubscribers: MOCK_SUBSCRIBERS.length,
+      totalProcessed: 0,
+      sent: 0,
+      failed: 0,
+      blocked: 0,
+      results: [],
+    };
+
+    await db.collection("bulkInvoiceLogs").doc(logId).set(logDoc);
+
     // Mark job as Running (skip for test send)
     if (!isTest) {
-      await jobDoc.ref.update({ status: "Running", updatedAt: new Date().toISOString() });
-    }
-
-    const { startDate, endDate } = job;
-
-    try {
-      // Get PayEx token (fail gracefully)
-      let payexToken: string | null = null;
-      try {
-        const tokenData = await getTokenData(process.env.PAYEX_TOKEN ?? "");
-        payexToken = tokenData.access_token;
-      } catch {
-        console.warn("[run] PayEx token fetch failed — payment links will be placeholder");
-      }
-
-      // Process all subscribers in chunks of CHUNK_SIZE, sharing one browser
-      // instance across the whole run to avoid launching Chromium per subscriber.
-      const allResults: SubscriberResult[] = [];
-      const chunks = chunkArray(MOCK_SUBSCRIBERS, CHUNK_SIZE);
-      const browser = await launchBrowser();
-
-      try {
-        for (const chunk of chunks) {
-          const chunkResults = await Promise.all(
-            chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken, browser))
-          );
-          allResults.push(...chunkResults);
-        }
-      } finally {
-        await browser.close();
-      }
-
-      // Tally results
-      const sent = allResults.filter((r) => r.status === "sent");
-      const failed = allResults.filter((r) => r.status === "failed");
-      const blocked = allResults.filter((r) => r.status === "blocked");
-      const eligible = allResults.filter((r) => r.status !== "blocked");
-
-      const finalStatus: "Completed" | "Partially Completed" | "Failed" =
-        sent.length === eligible.length && failed.length === 0
-          ? "Completed"
-          : sent.length === 0 && failed.length > 0
-          ? "Failed"
-          : "Partially Completed";
-
-      const logId = uuidv4();
-      const now = new Date().toISOString();
-
-      const logDoc = {
-        logId,
-        jobId: job.jobId,
-        isTest,
-        startDate,
-        endDate,
-        scheduledSendDate: job.scheduledSendDate,
-        runAt: now,
-        status: finalStatus,
-        totalProcessed: allResults.length,
-        sent: sent.length,
-        failed: failed.length,
-        blocked: blocked.length,
-        results: allResults,
-      };
-
-      // Always write to bulkInvoiceLogs (including test runs)
-      await db.collection("bulkInvoiceLogs").doc(logId).set(logDoc);
-
-      // Only update job status and billing history for non-test runs
-      if (!isTest) {
-        // Write billing history for each successfully sent invoice
-        const batch = db.batch();
-
-        for (const result of sent) {
-          const billing = result.billing!;
-          const docRef = db
-            .collection("solsGreenBillingHistoryAdmin")
-            .doc(result.plantId)
-            .collection("billingHistory")
-            .doc(billing.billingYearMonth);
-
-          batch.set(
-            docRef,
-            {
-              ...billing,
-              billStatus: "sent_to_user",
-              payexPaymentURL: result.payexPaymentURL ?? null,
-              updatedAt: now,
-              updatedAtTs: Date.now(),
-            },
-            { merge: true }
-          );
-        }
-
-        await batch.commit();
-
-        await jobDoc.ref.update({
-          status: finalStatus,
-          updatedAt: now,
-          totalSubscribers: allResults.length,
-          eligibleCount: eligible.length,
-          blockedCount: blocked.length,
-          successCount: sent.length,
-          failedCount: failed.length,
-          latestLogId: logId,
-        });
-      }
-
-      return NextResponse.json({
-        logId,
-        isTest,
-        status: finalStatus,
-        totalProcessed: allResults.length,
-        sent: sent.length,
-        failed: failed.length,
-        blocked: blocked.length,
+      await jobDoc.ref.update({
+        status: "Running",
+        updatedAt: now,
+        latestLogId: logId,
       });
-    } catch (innerErr) {
-      console.error("[run] Processing failed:", innerErr);
-      if (!isTest) {
-        try {
-          const failLogId = uuidv4();
-          await db.collection("bulkInvoiceLogs").doc(failLogId).set({
-            logId: failLogId,
-            jobId: job.jobId,
-            isTest,
-            startDate,
-            endDate,
-            scheduledSendDate: job.scheduledSendDate,
-            runAt: new Date().toISOString(),
-            status: "Failed",
-            error: String(innerErr),
-          });
-        } catch (logErr) {
-          console.error("[run] Failed to write failure log:", logErr);
-        }
-        await jobDoc.ref.update({ status: "Failed", updatedAt: new Date().toISOString() });
-      }
-      throw innerErr;
     }
+
+    // Kick off chunk 0 in the background and respond immediately. Progress is
+    // observable by polling the job (non-test) or the log doc (both).
+    runInBackground(processChunk(db, baseUrl, logId, 0, isTest));
+
+    return NextResponse.json({
+      logId,
+      isTest,
+      status: "Running",
+      totalSubscribers: MOCK_SUBSCRIBERS.length,
+      chunkSize: CHUNK_SIZE,
+    });
   } catch (err) {
     console.error("[run]", err);
     return NextResponse.json({ error: String(err) }, { status: 500 });
@@ -431,8 +575,8 @@ async function handleRun(req: NextRequest) {
 
 // Vercel Cron invokes the scheduled path with an HTTP GET request, so the
 // automated path must be reachable via GET. The manual "Run Now" / "Test Send"
-// actions from the admin UI call this same route with POST (and force=true).
-// Both delegate to the shared handler.
+// actions from the admin UI (and chunk self-triggers) use POST. Both delegate
+// to the shared handler.
 export async function GET(req: NextRequest) {
   return handleRun(req);
 }

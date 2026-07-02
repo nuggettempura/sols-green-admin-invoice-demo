@@ -179,6 +179,29 @@ export default function SendBulkInvoicePage() {
     }
   }
 
+  // Polls the run's log doc until the chunked processing reaches a terminal
+  // status. Returns null if it doesn't finish within the polling window.
+  async function pollRunLog(
+    logId: string
+  ): Promise<{ status: string; sent: number; failed: number; blocked: number } | null> {
+    const POLL_INTERVAL_MS = 3000;
+    const MAX_POLLS = 200; // ~10 minutes
+    for (let i = 0; i < MAX_POLLS; i++) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      try {
+        const res = await fetch(`/api/bulk-invoice/logs?logId=${encodeURIComponent(logId)}`);
+        if (!res.ok) continue;
+        const log = await res.json() as { status: string; sent: number; failed: number; blocked: number };
+        if (log.status !== "Running") {
+          return { status: log.status, sent: log.sent, failed: log.failed, blocked: log.blocked };
+        }
+      } catch {
+        // transient polling error — keep trying
+      }
+    }
+    return null;
+  }
+
   async function handleRun(isTest: boolean) {
     if (!currentJob || running) return;
     setRunning(true);
@@ -187,9 +210,17 @@ export default function SendBulkInvoicePage() {
       const res = await fetch(`/api/bulk-invoice/run?force=true${isTest ? "&isTest=true" : ""}`, {
         method: "POST",
       });
-      const data = await res.json() as { status: string; sent: number; failed: number; blocked: number; error?: string };
-      if (!res.ok) {
-        showToast(data.error || "Run failed", "error");
+      const started = await res.json() as { logId?: string; error?: string };
+      if (!res.ok || !started.logId) {
+        showToast(started.error || "Run failed", "error");
+        return;
+      }
+
+      // The run is processed in self-invoking chunks server-side; poll the
+      // log doc until it reaches a terminal status.
+      const data = await pollRunLog(started.logId);
+      if (!data) {
+        showToast("Run started but did not finish within the polling window. Check Send History.", "warning");
         return;
       }
       setRunResult({ ...data, isTest });
