@@ -339,7 +339,7 @@ export default function SendBulkInvoicePage() {
         {/* Section 3: Eligible subscribers */}
         {billingRange && (
           <>
-            <div className="bg-white rounded-2xl shadow p-6">
+            <div className="bg-white rounded-2xl shadow p-6 max-h-6xl">
               <h3 className="text-base font-semibold text-gray-900 mb-3">
                 Eligible Subscribers ({eligible.length})
               </h3>

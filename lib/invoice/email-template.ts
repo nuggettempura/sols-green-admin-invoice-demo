@@ -21,7 +21,7 @@ export function buildInvoiceEmailHtml(params: InvoiceEmailParams): string {
 </div>`
     : "";
 
-  return `<html><body style="font-family: Arial, sans-serif; font-size: 14px; color: #333; max-width: 600px; margin: 0 auto; padding: 20px;">
+  return `<html><body style="font-family: Arial, sans-serif; font-size: 14px; color: #333; margin: 0 auto; padding: 20px;">
 <p>Dear ${customerName},</p>
 
 <p>We trust this message finds you in good health. We sincerely appreciate your ongoing commitment to sustainable energy with us. Enclosed, please find your monthly solar generation invoice <strong>${invoiceNumber}</strong> for <strong>${billingPeriod}</strong>.</p>
