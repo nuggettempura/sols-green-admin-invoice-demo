@@ -104,7 +104,7 @@ async function sendInvoiceEmail(
   const mg = mailgunClient.client({
     username: "api",
     key: process.env.MAILGUN_API_KEY ?? "",
-    url: "https://api.mailgun.net",
+    // url: "https://api.mailgun.net",
   });
 
   const html = buildInvoiceEmailHtml({

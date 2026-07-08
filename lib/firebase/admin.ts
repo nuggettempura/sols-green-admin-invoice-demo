@@ -21,7 +21,7 @@ export const adminApp: App =
       // The emulator doesn't validate project IDs, so a fixed placeholder is fine
       // there. Against real Firestore, project ID must come from the service
       // account credential itself (cert() infers it) rather than being hardcoded.
-      ...(isEmulator ? { projectId: "demo-no-project" } : {}),
+      ...(isEmulator ? { projectId: "sols-bulk-invoice-demo" } : {}),
     },
     "demo"
   );

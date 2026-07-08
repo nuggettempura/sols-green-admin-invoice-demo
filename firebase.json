@@ -1,6 +1,6 @@
 {
   "projects": {
-    "default": "sols-energy-dev"
+    "default": "sols-bulk-invoice-demo"
   },
   "emulators": {
     "auth": {
