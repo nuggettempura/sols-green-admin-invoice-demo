@@ -10,7 +10,6 @@
 // invocations; the final chunk writes the terminal status.
 import { NextRequest, NextResponse } from "next/server";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
-import { getAuth } from "firebase-admin/auth";
 import { waitUntil } from "@vercel/functions";
 import { v4 as uuidv4 } from "uuid";
 import type { Browser } from "puppeteer-core";
@@ -391,14 +390,38 @@ async function processChunk(
  * Verifies the caller presents a Firebase ID token whose custom claims include
  * admin === true. Used to authenticate manual (force=true) runs from the admin
  * UI so an anonymous caller cannot trigger a real send.
+ *
+ * Verifies via Firebase's Identity Toolkit REST endpoint rather than the Admin
+ * SDK's getAuth().verifyIdToken(): firebase-admin/auth pulls in jose (ESM) via
+ * jwks-rsa, which fails to load in this serverless runtime (ERR_REQUIRE_ESM).
+ * accounts:lookup validates the token server-side (signature + expiry) and
+ * returns the user's customAttributes, from which we read the admin claim.
  */
 async function isAuthenticatedAdmin(req: NextRequest): Promise<boolean> {
   const authHeader = req.headers.get("authorization");
   if (!authHeader?.startsWith("Bearer ")) return false;
   const idToken = authHeader.slice("Bearer ".length);
+
+  const apiKey = process.env.NEXT_PUBLIC_API_KEY;
+  if (!apiKey) return false;
+
   try {
-    const decoded = await getAuth(adminApp).verifyIdToken(idToken);
-    return decoded.admin === true;
+    const res = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken }),
+      }
+    );
+    if (!res.ok) return false;
+    const data = (await res.json()) as {
+      users?: Array<{ customAttributes?: string }>;
+    };
+    const customAttributes = data.users?.[0]?.customAttributes;
+    if (!customAttributes) return false;
+    const claims = JSON.parse(customAttributes) as { admin?: boolean };
+    return claims.admin === true;
   } catch {
     return false;
   }
