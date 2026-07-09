@@ -12,6 +12,7 @@ interface SubscriberResult {
   reason?: string;
   missingDates?: string[];
   invoiceNumber?: string;
+  previewUrl?: string | null;
   error?: string;
 }
 
@@ -144,7 +145,8 @@ export default function BulkInvoiceSendHistoryPage() {
                         <th className="text-left pb-2 pr-4">Customer</th>
                         <th className="text-left pb-2 pr-4">Plant ID</th>
                         <th className="text-left pb-2 pr-4">Status</th>
-                        <th className="text-left pb-2">Reason / Error</th>
+                        <th className="text-left pb-2 pr-4">Reason / Error</th>
+                        <th className="text-left pb-2">Email</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-50">
@@ -155,11 +157,20 @@ export default function BulkInvoiceSendHistoryPage() {
                           <td className={`py-2 pr-4 font-semibold capitalize ${RESULT_COLORS[r.status]}`}>
                             {r.status}
                           </td>
-                          <td className="py-2 text-gray-500 text-xs max-w-xs truncate">
+                          <td className="py-2 pr-4 text-gray-500 text-xs max-w-xs truncate">
                             {r.invoiceNumber && <span className="text-gray-700 mr-2">{r.invoiceNumber}</span>}
                             {r.reason || r.error || ""}
                             {r.missingDates && r.missingDates.length > 0 && (
                               <span className="text-amber-700 ml-1">({r.missingDates.join(", ")})</span>
+                            )}
+                          </td>
+                          <td className="py-2 text-xs">
+                            {r.previewUrl ? (
+                              <a href={r.previewUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline font-medium">
+                                View email
+                              </a>
+                            ) : (
+                              <span className="text-gray-300">—</span>
                             )}
                           </td>
                         </tr>

@@ -12,8 +12,6 @@ import { NextRequest, NextResponse } from "next/server";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
 import { getAuth } from "firebase-admin/auth";
 import { waitUntil } from "@vercel/functions";
-import Mailgun from "mailgun.js";
-import FormData from "form-data";
 import { v4 as uuidv4 } from "uuid";
 import type { Browser } from "puppeteer-core";
 import { launchBrowser } from "@/lib/invoice/launch-browser";
@@ -25,6 +23,7 @@ import type { BillingCalculation } from "@/lib/invoice/calculate-billing";
 import { getTokenData, createPaymentIntentURL } from "@/lib/payex/payex.service";
 import { generateInvoicePDF } from "@/lib/invoice/generate-pdf";
 import { buildInvoiceEmailHtml } from "@/lib/invoice/email-template";
+import { createMailTransport, sendInvoiceEmail, MailTransport } from "@/lib/invoice/mailer";
 
 // Headless-Chromium PDF generation needs far more than Vercel's default 10s.
 // 60s is the Hobby-plan ceiling (Pro allows up to 300s). Each chunk gets its
@@ -40,6 +39,7 @@ interface SubscriberResult {
   missingDates?: string[];
   invoiceNumber?: string;
   payexPaymentURL?: string;
+  previewUrl?: string | null;
   error?: string;
   billing?: BillingCalculation;
 }
@@ -96,59 +96,13 @@ function addYears(dateStr: string, years: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-async function sendInvoiceEmail(
-  to: string,
-  customerName: string,
-  invoiceNumber: string,
-  billingPeriod: string,
-  totalAmount: string,
-  dueDate: string,
-  paymentURL: string,
-  pdfBytes: Uint8Array
-): Promise<{ id: string; message: string }> {
-  const mailgunClient = new Mailgun(FormData);
-  const mg = mailgunClient.client({
-    username: "api",
-    key: process.env.MAILGUN_API_KEY ?? "",
-    // Region-configurable: US (default) or set MAILGUN_API_URL to
-    // https://api.eu.mailgun.net for an EU account. Sandbox domains are US.
-    url: process.env.MAILGUN_API_URL ?? "https://api.mailgun.net",
-  });
-
-  const html = buildInvoiceEmailHtml({
-    customerName,
-    invoiceNumber,
-    billingPeriod,
-    totalAmount,
-    dueDate,
-    paymentURL,
-  });
-
-  const domain = process.env.MAILGUN_DOMAIN ?? "";
-
-  const result = await mg.messages.create(domain, {
-    from: `SOLS Energy <no-reply@${domain}>`,
-    to: [to],
-    subject: `Your Invoice ${invoiceNumber} — ${totalAmount} Due ${dueDate}`,
-    html,
-    attachment: [
-      {
-        filename: `${invoiceNumber}.pdf`,
-        data: Buffer.from(pdfBytes),
-        contentType: "application/pdf",
-      },
-    ],
-  });
-
-  return result as { id: string; message: string };
-}
-
 async function processSubscriber(
   subscriber: MockSubscriber,
   startDate: string,
   endDate: string,
   payexToken: string | null,
-  browser: Browser
+  browser: Browser,
+  mail: MailTransport
 ): Promise<SubscriberResult> {
   const plantId = subscriber.plant_id;
   const name = subscriber.name;
@@ -232,20 +186,27 @@ async function processSubscriber(
   }
 
   // Send email
+  let previewUrl: string | null = null;
   try {
     const billingPeriod = `${formatDate(startDate)} – ${formatDate(endDate)}`;
     const totalAmount = `RM ${billing.taxInclusiveAmount.toFixed(2)}`;
     const dueDateFormatted = formatDate(billing.dueDate);
-    await sendInvoiceEmail(
-      email,
-      name,
-      billing.invoiceNumber,
+    const html = buildInvoiceEmailHtml({
+      customerName: name,
+      invoiceNumber: billing.invoiceNumber,
       billingPeriod,
       totalAmount,
-      dueDateFormatted,
-      payexPaymentURL,
-      pdfBytes
-    );
+      dueDate: dueDateFormatted,
+      paymentURL: payexPaymentURL,
+    });
+    const sendResult = await sendInvoiceEmail(mail, {
+      to: email,
+      subject: `Your Invoice ${billing.invoiceNumber} — ${totalAmount} Due ${dueDateFormatted}`,
+      html,
+      attachmentFilename: `${billing.invoiceNumber}.pdf`,
+      pdfBytes,
+    });
+    previewUrl = sendResult.previewUrl;
   } catch (emailErr) {
     return {
       plantId,
@@ -263,6 +224,7 @@ async function processSubscriber(
     status: "sent",
     invoiceNumber: billing.invoiceNumber,
     payexPaymentURL,
+    previewUrl,
     billing,
   };
 }
@@ -351,15 +313,18 @@ async function processChunk(
 
     const chunk = MOCK_SUBSCRIBERS.slice(cursor, cursor + CHUNK_SIZE);
 
-    // One browser per invocation, shared across this chunk's subscribers.
+    // One browser and one mail transporter per invocation, shared across this
+    // chunk's subscribers.
     const browser = await launchBrowser();
+    const mail = await createMailTransport();
     let chunkResults: SubscriberResult[];
     try {
       chunkResults = await Promise.all(
-        chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken, browser))
+        chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken, browser, mail))
       );
     } finally {
       await browser.close();
+      mail.transporter.close();
     }
 
     const now = new Date().toISOString();
