@@ -10,6 +10,7 @@
 // invocations; the final chunk writes the terminal status.
 import { NextRequest, NextResponse } from "next/server";
 import { getFirestore, Firestore } from "firebase-admin/firestore";
+import { getAuth } from "firebase-admin/auth";
 import { waitUntil } from "@vercel/functions";
 import Mailgun from "mailgun.js";
 import FormData from "form-data";
@@ -75,6 +76,11 @@ interface RunLogDocument {
 // own invocation.
 const CHUNK_SIZE = 10;
 
+// Safety valve: a single run may not target more recipients than this. Protects
+// live email/payment quotas from a misconfigured or abusive run. Override via
+// MAX_RECIPIENTS_PER_RUN (raise it for production subscriber volumes).
+const MAX_RECIPIENTS_PER_RUN = parseInt(process.env.MAX_RECIPIENTS_PER_RUN ?? "100", 10);
+
 function formatDate(dateStr: string): string {
   return new Date(dateStr + "T00:00:00Z").toLocaleDateString("en-MY", {
     day: "numeric",
@@ -104,7 +110,9 @@ async function sendInvoiceEmail(
   const mg = mailgunClient.client({
     username: "api",
     key: process.env.MAILGUN_API_KEY ?? "",
-    // url: "https://api.mailgun.net",
+    // Region-configurable: US (default) or set MAILGUN_API_URL to
+    // https://api.eu.mailgun.net for an EU account. Sandbox domains are US.
+    url: process.env.MAILGUN_API_URL ?? "https://api.mailgun.net",
   });
 
   const html = buildInvoiceEmailHtml({
@@ -454,6 +462,23 @@ async function processChunk(
   }
 }
 
+/**
+ * Verifies the caller presents a Firebase ID token whose custom claims include
+ * admin === true. Used to authenticate manual (force=true) runs from the admin
+ * UI so an anonymous caller cannot trigger a real send.
+ */
+async function isAuthenticatedAdmin(req: NextRequest): Promise<boolean> {
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader?.startsWith("Bearer ")) return false;
+  const idToken = authHeader.slice("Bearer ".length);
+  try {
+    const decoded = await getAuth(adminApp).verifyIdToken(idToken);
+    return decoded.admin === true;
+  } catch {
+    return false;
+  }
+}
+
 async function handleRun(req: NextRequest) {
   const { searchParams } = req.nextUrl;
   const force = searchParams.get("force") === "true";
@@ -486,9 +511,17 @@ async function handleRun(req: NextRequest) {
     }
 
     // ── First invocation (Vercel Cron, or manual Run Now / Test Send) ───────
-    // Vercel Cron authenticates via `Authorization: Bearer $CRON_SECRET`.
-    // Manual UI calls use `force=true` and aren't required to present it.
-    if (!force && !hasValidSecret) {
+    // Auth model:
+    //  - Cron (no force): must present `Authorization: Bearer $CRON_SECRET`
+    //    (Vercel injects this automatically when CRON_SECRET is configured).
+    //  - Admin UI (force=true): must present a valid Firebase ID token with an
+    //    admin claim. Closes the previously open force=true trigger so an
+    //    anonymous caller cannot fire a real send against live email/payment.
+    if (force) {
+      if (!(await isAuthenticatedAdmin(req))) {
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+    } else if (!hasValidSecret) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
@@ -521,6 +554,17 @@ async function handleRun(req: NextRequest) {
 
     if (job.status === "Running") {
       return NextResponse.json({ error: "Job is already running" }, { status: 409 });
+    }
+
+    // Safety valve: refuse runs above the configured recipient ceiling so a
+    // misconfigured or abusive run can't drain live email/payment quotas.
+    if (MOCK_SUBSCRIBERS.length > MAX_RECIPIENTS_PER_RUN) {
+      return NextResponse.json(
+        {
+          error: `Run blocked: ${MOCK_SUBSCRIBERS.length} recipients exceeds the safety cap of ${MAX_RECIPIENTS_PER_RUN}. Raise MAX_RECIPIENTS_PER_RUN to proceed.`,
+        },
+        { status: 400 }
+      );
     }
 
     const { startDate, endDate } = job;

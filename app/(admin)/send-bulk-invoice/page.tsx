@@ -3,6 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { fbAuth } from "@/lib/firebase/client";
 import { MOCK_SUBSCRIBERS } from "@/lib/mock/subscribers";
 import { isSubscriberEligible, getMissingDates } from "@/lib/mock/generation";
 
@@ -207,8 +208,16 @@ export default function SendBulkInvoicePage() {
     setRunning(true);
     setRunResult(null);
     try {
+      // Authenticate the manual run with the admin's Firebase ID token so the
+      // force=true trigger is not open to anonymous callers.
+      const idToken = await fbAuth.currentUser?.getIdToken();
+      if (!idToken) {
+        showToast("Your session has expired. Please sign in again.", "error");
+        return;
+      }
       const res = await fetch(`/api/bulk-invoice/run?force=true${isTest ? "&isTest=true" : ""}`, {
         method: "POST",
+        headers: { authorization: `Bearer ${idToken}` },
       });
       const started = await res.json() as { logId?: string; error?: string };
       if (!res.ok || !started.logId) {
