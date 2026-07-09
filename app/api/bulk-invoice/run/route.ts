@@ -20,7 +20,6 @@ import { MOCK_SUBSCRIBERS, MockSubscriber } from "@/lib/mock/subscribers";
 import { getMissingDates, isSubscriberEligible } from "@/lib/mock/generation";
 import { calculateBilling } from "@/lib/invoice/calculate-billing";
 import type { BillingCalculation } from "@/lib/invoice/calculate-billing";
-import { getTokenData, createPaymentIntentURL } from "@/lib/payex/payex.service";
 import { generateInvoicePDF } from "@/lib/invoice/generate-pdf";
 import { buildInvoiceEmailHtml } from "@/lib/invoice/email-template";
 import { createMailTransport, sendInvoiceEmail, MailTransport } from "@/lib/invoice/mailer";
@@ -90,17 +89,10 @@ function formatDate(dateStr: string): string {
   });
 }
 
-function addYears(dateStr: string, years: number): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  d.setUTCFullYear(d.getUTCFullYear() + years);
-  return d.toISOString().slice(0, 10);
-}
-
 async function processSubscriber(
   subscriber: MockSubscriber,
   startDate: string,
   endDate: string,
-  payexToken: string | null,
   browser: Browser,
   mail: MailTransport
 ): Promise<SubscriberResult> {
@@ -135,34 +127,11 @@ async function processSubscriber(
   // Calculate billing
   const billing: BillingCalculation = calculateBilling(plantId, startDate, endDate);
 
-  // Generate PayEx payment link
+  // Demo payment link. In production this is where the payment gateway's
+  // per-invoice payment intent URL is created (using the gateway's credentials
+  // and billing.nonce / billing.payexCollectionID as references).
   const baseUrl = process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000";
-  let payexPaymentURL = `${baseUrl}/payment-placeholder`;
-
-  if (payexToken) {
-    try {
-      const expiryDate = addYears(billing.billGeneratedDate, 1);
-      payexPaymentURL = await createPaymentIntentURL(payexToken, {
-        amount: Math.round(billing.displayPayableAmount * 100),
-        collectionId: billing.payexCollectionID,
-        customerName: name,
-        email,
-        contactNumber: "0123456789",
-        address: "Malaysia",
-        nonce: billing.nonce,
-        referenceNumber: billing.invoiceNumber,
-        returnUrl: `${baseUrl}/payment/return`,
-        acceptUrl: `${baseUrl}/payment/accept`,
-        rejectUrl: `${baseUrl}/payment/reject`,
-        callbackUrl: `${baseUrl}/api/payex/callback`,
-        expiryDate,
-        splitAccount: process.env.PAYEX_SPLIT_ACCOUNT,
-      });
-    } catch (payexErr) {
-      console.warn(`[run] PayEx failed for ${plantId}:`, payexErr);
-      // Continue with placeholder URL (non-fatal)
-    }
-  }
+  const payexPaymentURL = `${baseUrl}/payment-placeholder?ref=${encodeURIComponent(billing.invoiceNumber)}`;
 
   // Generate PDF
   let pdfBytes: Uint8Array;
@@ -302,15 +271,6 @@ async function processChunk(
   const { startDate, endDate, jobId } = log;
 
   try {
-    // Get PayEx token (fail gracefully)
-    let payexToken: string | null = null;
-    try {
-      const tokenData = await getTokenData(process.env.PAYEX_TOKEN ?? "");
-      payexToken = tokenData.access_token;
-    } catch {
-      console.warn("[run] PayEx token fetch failed — payment links will be placeholder");
-    }
-
     const chunk = MOCK_SUBSCRIBERS.slice(cursor, cursor + CHUNK_SIZE);
 
     // One browser and one mail transporter per invocation, shared across this
@@ -320,7 +280,7 @@ async function processChunk(
     let chunkResults: SubscriberResult[];
     try {
       chunkResults = await Promise.all(
-        chunk.map((sub) => processSubscriber(sub, startDate, endDate, payexToken, browser, mail))
+        chunk.map((sub) => processSubscriber(sub, startDate, endDate, browser, mail))
       );
     } finally {
       await browser.close();
